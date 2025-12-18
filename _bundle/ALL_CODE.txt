@@ -1,0 +1,2952 @@
+### GenelAksiyon_VBA - TOPLU KOD DÃ–KÃœMÃœ
+### GÃ¼ncelleme (UTC): Thu Dec 18 09:43:14 UTC 2025
+
+/* ===== FILE: ./BuÃ‡alÄ±ÅŸmaKitabÄ±.cls ===== */
+
+VERSION 1.0 CLASS
+BEGIN
+  MultiUse = -1  'True
+END
+Attribute VB_Name = "BuÇalýþmaKitabý"
+Attribute VB_GlobalNameSpace = False
+Attribute VB_Creatable = False
+Attribute VB_PredeclaredId = True
+Attribute VB_Exposed = True
+
+'== ThisWorkbook ==
+Option Explicit
+Private AppEv As CAppEvents
+
+Private Sub Workbook_Open()
+    Set AppEv = New CAppEvents
+    Set AppEv.App = Application
+
+    ' Dashboard kur
+    On Error Resume Next
+    Call RebuildDashboard
+    On Error GoTo 0
+
+    ' Günlük rapor zamanlama (hafta içi 17:00)
+    Call ScheduleDailyOverdueReports
+    Call ScheduleDailyTodayPlans       ' 08:15 günlük iþ plan
+End Sub
+
+Private Sub Workbook_BeforeClose(Cancel As Boolean)
+    On Error Resume Next
+    Set AppEv.App = Nothing
+    Set AppEv = Nothing
+    ' Zamanlamayý iptal et (güvenli)
+    Call CancelDailySchedule
+    Call CancelDailyTodayPlans
+End Sub
+
+
+
+/* ===== END FILE: ./BuÃ‡alÄ±ÅŸmaKitabÄ±.cls ===== */
+
+/* ===== FILE: ./CAppEvents.cls ===== */
+
+VERSION 1.0 CLASS
+BEGIN
+  MultiUse = -1  'True
+END
+Attribute VB_Name = "CAppEvents"
+Attribute VB_GlobalNameSpace = False
+Attribute VB_Creatable = False
+Attribute VB_PredeclaredId = False
+Attribute VB_Exposed = False
+
+'== CAppEvents ==
+Option Explicit
+Public WithEvents App As Application
+Attribute App.VB_VarHelpID = -1
+
+Private Sub App_SheetChange(ByVal sh As Object, ByVal Target As Range)
+    On Error GoTo ExitPoint
+
+    If Not IsMeetingSheet(sh) Then Exit Sub
+    If Application.EnableEvents = False Then Exit Sub
+
+    Application.EnableEvents = False
+
+    Dim rngF As Range, rngJ As Range, rngEFH As Range
+
+    ' -- F (Sorumlu) › G (Listeye Giriþ) tarih --
+    Set rngF = Intersect(Target, sh.Columns("F"))
+    If Not rngF Is Nothing Then
+        Dim c As Range
+        For Each c In rngF.Cells
+            If Len(c.value) > 0 And IsEmpty(sh.Cells(c.Row, "G").value) Then
+                sh.Cells(c.Row, "G").value = Date
+            End If
+        Next c
+    End If
+
+    
+' -- J (%Tamamlanma) ? %99 › I tarih; K boþsa uyar; TAMAMLAMA MAILI (bir kez) --
+Set rngJ = Intersect(Target, sh.Columns("J"))
+If Not rngJ Is Nothing Then
+    Dim jCell As Range, v As Variant
+    For Each jCell In rngJ.Cells
+        v = jCell.Value2
+        If IsNumeric(v) Then
+            If v >= 0.99 Then
+                ' Bitiþ tarihi bir kez
+                If IsEmpty(sh.Cells(jCell.Row, "I").value) Then
+                    sh.Cells(jCell.Row, "I").value = Date
+                End If
+                ' Kanýt uyarýsý
+                If Len(Trim$(sh.Cells(jCell.Row, "K").value)) = 0 Then
+                    MsgBox "Kanýt Ekleyiniz (Link)", vbExclamation, "Uyarý"
+                End If
+                ' Tamamlama maili (N bayraðý yoksa)
+                If Trim$(CStr(sh.Cells(jCell.Row, "N").value)) <> "TamMail" Then
+                    If SendCompletionMail(sh, jCell.Row, ONEDRIVE_LINK) = True Then
+                        sh.Cells(jCell.Row, "N").value = "TamMail"
+                    End If
+                End If
+            End If
+        End If
+    Next jCell
+End If
+
+
+    ' -- E, F, H ilk kez dolduysa ve J<%99 ise mail gönder (M boþsa) --
+    Set rngEFH = Intersect(Target, sh.Range("E:H"))
+    If Not rngEFH Is Nothing Then
+        Dim r As Range, rowNum As Long, vJ As Variant
+        For Each r In rngEFH.Rows
+            rowNum = r.Row
+
+            If Len(sh.Cells(rowNum, "E").value) > 0 _
+               And Len(sh.Cells(rowNum, "F").value) > 0 _
+               And Len(sh.Cells(rowNum, "H").value) > 0 Then
+
+                vJ = sh.Cells(rowNum, "J").Value2
+                If Not IsNumeric(vJ) Then vJ = 0
+
+                If Trim$(CStr(sh.Cells(rowNum, "M").value)) <> "Gönderildi" _
+                   And vJ < 0.99 Then
+
+                    If SendTaskMail(sh, rowNum, ONEDRIVE_LINK) = True Then
+                        sh.Cells(rowNum, "M").value = "Gönderildi"
+                    End If
+                End If
+            End If
+        Next r
+    End If
+
+ExitPoint:
+    Application.EnableEvents = True
+End Sub
+
+
+
+/* ===== END FILE: ./CAppEvents.cls ===== */
+
+/* ===== FILE: ./Mod_Dashboard_V2.bas ===== */
+
+Attribute VB_Name = "Mod_Dashboard_V2"
+
+'== Mod_Dashboard_V2.bas ==
+Option Explicit
+
+' -------------------------
+' YERLEÞÝM SABÝTLERÝ (HÜCRE-ANKORLU)
+' -------------------------
+' Bu hücreleri kendi görüntünüze göre kolayca ayarlayabilirsiniz.
+Private Const ROW_KPI_TOP     As Long = 6    ' KPI barlarýnýn üst satýrý (logo hizasý sað üst)
+Private Const COL_KPI_LEFT    As String = "M" ' KPI sol üst hücresi (ör. M6)
+Private Const ROW_BUTTONS     As Long = 9    ' Butonlarýn üst satýrý (baþlýða yakýn)
+Private Const COL_BUTTONS_CTR As String = "H" ' Butonlarý bu sütunun etrafýna ortalayacaðýz (H)
+Private Const ROW_HEADER      As Long = 10   ' Baþlýk bandýnýn baþladýðý satýr
+Private Const ROW_GRID_START  As Long = 12   ' Kart ýzgarasýnýn baþladýðý satýr (headerdan en az 4 satýr alt)
+Private Const ROW_TREND_TOP   As Long = 26   ' Trend grafiðinin üst satýrý (kartlardan sonra)
+Private Const TILE_W          As Single = 240
+Private Const TILE_H          As Single = 92
+Private Const GAP_X           As Single = 16
+Private Const GAP_Y           As Single = 16
+Private Const COLS            As Long = 4    ' satýr baþýna 4 kart
+
+' (Opsiyonel) harici logo yolu; boþsa Assets/CompanyLogo kullanýlacak
+Private Const LOGO_PATH As String = ""
+
+' -------------------------
+' RENK / LOGO / BAÞLIK
+' -------------------------
+Private Function Dash_HexToRGB(ByVal hexColor As String) As Long
+    Dim h As String, r As Long, g As Long, b As Long
+    h = Replace$(Trim$(hexColor), "#", "")
+    If Len(h) <> 6 Then Dash_HexToRGB = RGB(47, 85, 151): Exit Function
+    r = CLng("&H" & Mid$(h, 1, 2))
+    g = CLng("&H" & Mid$(h, 3, 2))
+    b = CLng("&H" & Mid$(h, 5, 2))
+    Dash_HexToRGB = RGB(r, g, b)
+End Function
+
+Private Function Dash_EnsureSingleLogo(ByVal ws As Worksheet, Optional ByVal desiredWidth As Single = 220) As Shape
+    Dim s As Shape, base As Shape
+    On Error Resume Next
+    For Each s In ws.Shapes
+        If (s.Type = msoPicture Or s.Type = msoLinkedPicture) Then
+            If LCase$(s.Name) Like "*report_logo*" Or LCase$(s.AlternativeText) Like "*report_logo*" Then
+                If base Is Nothing Then
+                    Set base = s
+                    base.Name = "Report_Logo": base.AlternativeText = "Report_Logo"
+                Else
+                    s.Delete
+                End If
+            End If
+        End If
+    Next s
+    If base Is Nothing Then
+        If Len(Dir(LOGO_PATH)) > 0 Then
+            Set base = ws.Shapes.AddPicture(LOGO_PATH, False, True, 0, 0, desiredWidth, desiredWidth * 0.45)
+        Else
+            ThisWorkbook.Worksheets("Assets").Shapes("CompanyLogo").Copy
+            ws.Paste
+            If Err.Number = 0 Then Set base = ws.Shapes(ws.Shapes.Count)
+            Err.Clear
+        End If
+    End If
+    If Not base Is Nothing Then
+        base.LockAspectRatio = msoTrue
+        base.width = desiredWidth
+        base.left = ws.Range("A1").left + 12
+        base.Top = ws.Range("A1").Top + 6
+        base.ZOrder msoBringToFront
+        base.Name = "Report_Logo": base.AlternativeText = "Report_Logo"
+    End If
+    Set Dash_EnsureSingleLogo = base
+End Function
+
+' Baþlýk bandý (koyu gri), HÜCRE-ANKOR: ROW_HEADER
+Private Sub Dash_TitleBand(ByVal ws As Worksheet, ByVal titleText As String)
+    Dim left As Single, width As Single, lastCol As Long, right As Single
+    Dim bandRGB As Long: bandRGB = RGB(64, 64, 64)
+    Dim topOffset As Single: topOffset = ws.Range("A" & ROW_HEADER).Top
+
+    ' Eski band/baþlýklarý temizle
+    Dim shp As Shape
+    On Error Resume Next
+    For Each shp In ws.Shapes
+        If LCase$(shp.Name) Like "*dash_header*" Or LCase$(shp.Name) Like "*dash_band*" Then shp.Delete
+    Next shp
+    On Error GoTo 0
+
+    ' Geniþlik
+    left = ws.Range("A1").left + 5
+    lastCol = ws.UsedRange.Columns(ws.UsedRange.Columns.Count).Column
+    right = ws.Cells(1, lastCol).left + ws.Cells(1, lastCol).width
+    width = right - left - 5
+
+    ' Bant
+    Dim band As Shape
+    Set band = ws.Shapes.AddShape(msoShapeRectangle, left, topOffset, width, 44)
+    With band
+        .Name = "Dash_Band"
+        .Fill.ForeColor.RGB = bandRGB
+        .Line.Visible = msoFalse
+        .ZOrder msoSendToBack
+    End With
+
+    ' Baþlýk metni
+    Dim hdr As Shape
+    Set hdr = ws.Shapes.AddTextbox(msoTextOrientationHorizontal, left, topOffset, width, 44)
+    With hdr
+        .Name = "Dash_Header"
+        .TextFrame.Characters.text = titleText
+        .TextFrame.HorizontalAlignment = xlHAlignCenter
+        .TextFrame.VerticalAlignment = xlVAlignCenter
+        With .TextFrame.Characters.Font
+            .Name = "Segoe UI": .Size = 20: .Bold = True: .Color = RGB(255, 255, 255)
+        End With
+        .Line.Visible = msoFalse: .Fill.Visible = msoFalse
+    End With
+End Sub
+
+' Sayfa sað sýnýrý
+Private Function Dash_RightBound(ByVal ws As Worksheet) As Single
+    Dim lastCol As Long
+    lastCol = ws.UsedRange.Columns(ws.UsedRange.Columns.Count).Column
+    Dash_RightBound = ws.Cells(1, lastCol).left + ws.Cells(1, lastCol).width
+End Function
+
+' Ýzgarayý yatayda merkezle
+Private Function Dash_CenterGridLeft(ByVal ws As Worksheet, ByVal totalWidth As Single) As Single
+    Dim leftBound As Single: leftBound = ws.Range("A1").left
+    Dim rightBound As Single: rightBound = Dash_RightBound(ws)
+    Dash_CenterGridLeft = leftBound + (rightBound - leftBound - totalWidth) / 2
+    If Dash_CenterGridLeft < leftBound + 12 Then Dash_CenterGridLeft = leftBound + 12
+End Function
+
+' Gridlines kapatma (tüm pencerelerde + aktif pencere)
+Private Sub Dash_HideGridlinesAll()
+    Dim wnd As Window
+    For Each wnd In Application.Windows
+        On Error Resume Next
+        wnd.DisplayGridlines = False
+        On Error GoTo 0
+    Next wnd
+    On Error Resume Next
+    Application.ActiveWindow.DisplayGridlines = False
+    On Error GoTo 0
+End Sub
+
+' -------------------------
+' KART STÝLÝ (baþlýk 12pt, sayý 28pt)
+' -------------------------
+Private Sub Dash_DrawTile(ByVal ws As Worksheet, ByVal x As Single, ByVal y As Single, _
+                          ByVal w As Single, ByVal h As Single, ByVal title As String, _
+                          ByVal value As Long, ByVal hex As String, _
+                          Optional ByVal clickTag As String = "")
+    Dim bg As Shape, hdr As Shape, valBox As Shape, nmBase As String
+    Dim titleH As Single, valH As Single
+
+    nmBase = "TL_" & Replace(title, " ", "_") & "_" & Format(Timer, "0")
+
+    Set bg = ws.Shapes.AddShape(msoShapeRoundedRectangle, x, y, w, h)
+    With bg
+        .Fill.ForeColor.RGB = Dash_HexToRGB(hex)
+        .Line.Visible = msoFalse
+        .Name = nmBase & "_bg"
+        .Adjustments.Item(1) = 0.12
+        If Len(clickTag) > 0 Then .OnAction = "Dash_TileClick": .AlternativeText = clickTag
+        .Shadow.Visible = msoTrue: .Shadow.Blur = 8
+        .Shadow.OffsetX = 3: .Shadow.OffsetY = 3
+        .Shadow.ForeColor.RGB = RGB(180, 180, 180)
+        .ZOrder msoBringToFront
+    End With
+
+    titleH = h * 0.45: valH = h - titleH
+
+    Set hdr = ws.Shapes.AddTextbox(msoTextOrientationHorizontal, x, y, w, titleH)
+    With hdr
+        .Name = nmBase & "_hdr"
+        If Len(clickTag) > 0 Then .OnAction = "Dash_TileClick": .AlternativeText = clickTag
+        .TextFrame.Characters.text = title
+        .TextFrame.HorizontalAlignment = xlHAlignCenter
+        .TextFrame.VerticalAlignment = xlVAlignCenter
+        With .TextFrame.Characters.Font
+            .Name = "Segoe UI": .Size = 12: .Bold = True: .Color = RGB(255, 255, 255)
+        End With
+        .Line.Visible = msoFalse: .Fill.Visible = msoFalse
+        .ZOrder msoBringToFront
+    End With
+
+    Set valBox = ws.Shapes.AddTextbox(msoTextOrientationHorizontal, x, y + titleH, w, valH)
+    With valBox
+        .Name = nmBase & "_val"
+        If Len(clickTag) > 0 Then .OnAction = "Dash_TileClick": .AlternativeText = clickTag
+        .TextFrame.Characters.text = CStr(value)
+        .TextFrame.HorizontalAlignment = xlHAlignCenter
+        .TextFrame.VerticalAlignment = xlVAlignCenter
+        With .TextFrame.Characters.Font
+            .Name = "Segoe UI": .Size = 28: .Bold = True: .Color = RGB(255, 255, 255)
+        End With
+        .Line.Visible = msoFalse: .Fill.Visible = msoFalse
+        .ZOrder msoBringToFront
+    End With
+End Sub
+
+' -------------------------
+' KART TIKLAMA › FÝLTRE
+' -------------------------
+Public Sub Dash_TileClick()
+    Dim shp As Shape, tag As String
+    On Error Resume Next
+    Set shp = ThisWorkbook.Worksheets("Dashboard").Shapes(Application.Caller)
+    If shp Is Nothing Then Exit Sub
+    tag = shp.AlternativeText
+    If Len(tag) = 0 Then Exit Sub
+    Dash_ExecuteTileAction tag
+End Sub
+
+Private Sub Dash_ExecuteTileAction(ByVal tag As String)
+    Dim parts() As String, i As Long, kv As Variant
+    Dim targetSheet As String, targetType As String
+    parts = Split(tag, ";")
+    For i = LBound(parts) To UBound(parts)
+        kv = Split(parts(i), "=")
+        If UBound(kv) = 1 Then
+            If UCase$(Trim$(kv(0))) = "SHEET" Then targetSheet = Trim$(kv(1))
+            If UCase$(Trim$(kv(0))) = "TYPE" Then targetType = UCase$(Trim$(kv(1)))
+        End If
+    Next i
+    If Len(targetSheet) = 0 Then Exit Sub
+    If targetType = "OVERDUE" Then Dash_FilterSheetForOverdue targetSheet
+End Sub
+
+Public Sub Dash_FilterSheetForOverdue(ByVal sheetName As String)
+    Dim ws As Worksheet, lastRow As Long, lastCol As Long, headerRow As Long, rng As Range, i As Long
+    Dim dec As String, critJ As String
+
+    On Error Resume Next
+    Set ws = ThisWorkbook.Worksheets(sheetName)
+    On Error GoTo 0
+    If ws Is Nothing Then Exit Sub
+
+    headerRow = 4
+    For i = 1 To 10
+        If UCase$(Trim$(ws.Cells(i, 1).text)) = "SIRA" Then headerRow = i: Exit For
+    Next i
+
+    lastCol = ws.UsedRange.Columns(ws.UsedRange.Columns.Count).Column
+    lastRow = ws.Cells(ws.Rows.Count, "F").End(xlUp).Row
+    Set rng = ws.Range(ws.Cells(headerRow, 1), ws.Cells(lastRow, lastCol))
+
+    If ws.AutoFilterMode Then ws.AutoFilterMode = False
+    rng.AutoFilter
+
+    dec = Application.DecimalSeparator
+    critJ = "<0" & IIf(dec = ",", ",", ".") & "99"
+
+    rng.AutoFilter Field:=8, Criteria1:="<" & CDbl(Date), Operator:=xlAnd      ' H < bugün
+    rng.AutoFilter Field:=10, Criteria1:=critJ, Operator:=xlAnd                ' J < %99
+
+    ws.Activate
+    ws.Cells(headerRow + 1, 1).Select
+End Sub
+
+' -------------------------
+' DASHBOARD YÜZEY TEMÝZLÝÐÝ
+' -------------------------
+Private Sub Dash_ClearSurface(ByVal ws As Worksheet)
+    Dim shp As Shape, keep As Boolean
+    On Error Resume Next
+    For Each shp In ws.Shapes
+        keep = (LCase$(shp.Name) Like "*report_logo*")
+        If Not keep Then shp.Delete
+    Next shp
+    ws.Cells.ClearContents
+    ws.Cells.Font.Name = "Segoe UI"
+    ws.Cells.Font.Size = 10
+End Sub
+
+' -------------------------
+' GÜVENLÝ DÖNÜÞTÜRÜCÜLER (Tarih / Yüzde)
+' -------------------------
+Private Function Dash_ParsePercent(ByVal v As Variant) As Double
+    If IsError(v) Then Exit Function
+    If IsNumeric(v) Then Dash_ParsePercent = CDbl(v): Exit Function
+    If VarType(v) = vbString Then
+        Dim s As String: s = Trim$(v)
+        If s = "" Then Exit Function
+        Dim hasPct As Boolean: hasPct = (InStr(s, "%") > 0)
+        s = Replace$(s, "%", ""): s = Replace$(s, " ", ""): s = Replace$(s, ",", ".")
+        On Error Resume Next
+        Dim d As Double: d = CDbl(s)
+        If Err.Number = 0 Then
+            If hasPct And d > 1 Then d = d / 100
+            Dash_ParsePercent = d
+        End If
+        Err.Clear: On Error GoTo 0
+    End If
+End Function
+
+Private Function Dash_TryParseDate(ByVal v As Variant) As Variant
+    If IsError(v) Then Exit Function
+    If IsDate(v) Then Dash_TryParseDate = CDate(v): Exit Function
+    If IsNumeric(v) Then
+        If CDbl(v) > 0 Then Dash_TryParseDate = CDate(v)
+        Exit Function
+    End If
+    If VarType(v) = vbString Then
+        Dim s As String: s = Trim$(v)
+        If s = "" Or s = "-" Or s = "—" Then Exit Function
+        s = Replace$(s, ".", "/")
+        On Error Resume Next
+        Dim d As Date: d = DateValue(s)
+        If Err.Number = 0 Then Dash_TryParseDate = d
+        Err.Clear: On Error GoTo 0
+    End If
+End Function
+
+' -------------------------
+' KÝÞÝ BAZLI OPEN/OVERDUE
+' -------------------------
+Private Sub Dash_CollectOverduePerPerson(ByRef dict As Object)
+    Dim ws As Worksheet, lastRow As Long, r As Long
+    Dim vJ As Double, dPlan As Variant, key As String, fullName As String
+    Dim arr As Variant
+    Set dict = CreateObject("Scripting.Dictionary")
+
+    For Each ws In ThisWorkbook.Worksheets
+        If IsMeetingSheet(ws) Then
+            lastRow = ws.Cells(ws.Rows.Count, "F").End(xlUp).Row
+            For r = 5 To lastRow
+                key = Trim$(ws.Cells(r, "F").text)
+                If key <> "" Then
+                    vJ = Dash_ParsePercent(ws.Cells(r, "J").value)        ' J=%Tamamlanma
+                    dPlan = Dash_TryParseDate(ws.Cells(r, "H").value)      ' H=Planlanan
+                    fullName = ResolveFullName(key)
+
+                    If Not dict.Exists(key) Then dict.Add key, Array(fullName, 0&, 0&)
+                    arr = dict(key)
+
+                    If vJ < 0.99 Then
+                        arr(1) = arr(1) + 1
+                        If Not IsEmpty(dPlan) Then
+                            If CLng(CDate(dPlan)) < CLng(Date) Then arr(2) = arr(2) + 1
+                        End If
+                    End If
+
+                    dict(key) = arr
+                End If
+            Next r
+        End If
+    Next ws
+End Sub
+
+' -------------------------
+' SHEET ÝSTATÝSTÝKLERÝ (UDT: TStats) – güvenli
+' -------------------------
+Public Sub Dash_GetSheetStats(ByVal ws As Worksheet, ByRef st As TStats)
+    Dim lastRow As Long, r As Long
+    Dim vJ As Double, dPlan As Variant
+    Dim hasE As Boolean, hasF As Boolean
+
+    lastRow = ws.Cells(ws.Rows.Count, "F").End(xlUp).Row
+
+    For r = 5 To lastRow
+        hasE = (Len(Trim$(ws.Cells(r, "E").text)) > 0)
+        hasF = (Len(Trim$(ws.Cells(r, "F").text)) > 0)
+        If hasE And hasF Then
+            st.total = st.total + 1
+
+            vJ = Dash_ParsePercent(ws.Cells(r, "J").value)
+            dPlan = Dash_TryParseDate(ws.Cells(r, "H").value)
+
+            If vJ < 0.99 Then
+                st.Open = st.Open + 1
+                If Not IsEmpty(dPlan) Then
+                    Dim dNum As Long, tNum As Long
+                    dNum = CLng(CDate(dPlan))
+                    tNum = CLng(Date)
+
+                    If dNum < tNum Then
+                        st.Overdue = st.Overdue + 1
+                    ElseIf dNum = tNum Then
+                        st.DueToday = st.DueToday + 1
+                    End If
+                End If
+            End If
+        End If
+    Next r
+End Sub
+
+' -------------------------
+' SYSLOG TREND + MÝNÝ GRAFÝK (merkezlenmiþ, kartlardan sonra)
+' -------------------------
+Private Sub Dash_BuildSysLogTrends(ByVal ws As Worksheet, ByVal leftCell As Range)
+    Dim logWs As Worksheet, lastRow As Long, r As Long
+    Dim d As Date, key As String
+    Dim dict As Object: Set dict = CreateObject("Scripting.Dictionary")
+    Dim startDate As Date: startDate = Date - 29
+
+    On Error Resume Next
+    Set logWs = ThisWorkbook.Worksheets("SysLog")
+    On Error GoTo 0
+    If logWs Is Nothing Then Exit Sub
+
+    lastRow = logWs.Cells(logWs.Rows.Count, "A").End(xlUp).Row
+    For r = 2 To lastRow
+        If IsDate(logWs.Cells(r, "A").value) Then
+            d = CDate(logWs.Cells(r, "A").value)
+            If d >= startDate And d <= Date Then
+                key = Format(d, "yyyy-mm-dd")
+                If Not dict.Exists(key) Then dict.Add key, 0
+                dict(key) = dict(key) + 1
+            End If
+        End If
+    Next r
+
+    Dim outTop As Range: Set outTop = leftCell
+    outTop.Offset(0, 0).value = "Tarih"
+    outTop.Offset(0, 1).value = "Adet"
+
+    Dim i As Long, dayCount As Long: dayCount = 0
+    For i = 0 To 29
+        d = Date - (29 - i)
+        outTop.Offset(i + 1, 0).value = d
+        outTop.Offset(i + 1, 1).value = IIf(dict.Exists(Format(d, "yyyy-mm-dd")), dict(Format(d, "yyyy-mm-dd")), 0)
+        dayCount = dayCount + outTop.Offset(i + 1, 1).value
+    Next i
+
+    ' Eski grafiði sil ve yenisini ekle
+    Dim co As ChartObject, dataRng As Range
+    Set dataRng = ws.Range(outTop.Offset(1, 0), outTop.Offset(30, 1))
+    For Each co In ws.ChartObjects
+        If co.Name = "ch_Trends30" Then co.Delete
+    Next co
+
+    ' Kart ýzgarasýnýn geniþliði: 4 kart + boþluklar
+    Dim gridWidth As Single, gridLeft As Single
+    gridWidth = (TILE_W * COLS) + (GAP_X * (COLS - 1))
+    gridLeft = Dash_CenterGridLeft(ws, gridWidth)
+
+    Dim chartTop As Single: chartTop = ws.Range("A" & ROW_TREND_TOP).Top
+    Set co = ws.ChartObjects.Add(left:=gridLeft, Top:=chartTop, width:=gridWidth, Height:=170)
+    co.Name = "ch_Trends30"
+    With co.Chart
+        .ChartType = xlLine
+        .SetSourceData Source:=dataRng
+        .HasTitle = True: .ChartTitle.text = "Son 30 Gün Gönderim Trendi"
+        .Axes(xlCategory).TickLabels.NumberFormat = "dd.MM"
+        .Legend.Delete
+        ' Ýç grid çizgilerini kapat (arka çizgi algýsýný azaltýr)
+        .Axes(xlValue).HasMajorGridlines = False
+        .Axes(xlCategory).HasMajorGridlines = False
+    End With
+End Sub
+
+' -------------------------
+' KPI BARLARI – SAÐ ÜST (logo hizasý)
+' -------------------------
+Private Sub Dash_DrawProgressBarAt(ByVal ws As Worksheet, ByVal leftPx As Single, ByVal topPx As Single, _
+                                   ByVal w As Single, ByVal h As Single, ByVal ratio As Double, _
+                                   ByVal backRGB As Long, ByVal fillRGB As Long, ByVal caption As String)
+    Dim bg As Shape, fg As Shape, tx As Shape
+    If ratio < 0 Then ratio = 0
+    If ratio > 1 Then ratio = 1
+    Set bg = ws.Shapes.AddShape(msoShapeRectangle, leftPx, topPx, w, h)
+    With bg: .Fill.ForeColor.RGB = backRGB: .Line.Visible = msoFalse: End With
+    Set fg = ws.Shapes.AddShape(msoShapeRectangle, leftPx, topPx, w * ratio, h)
+    With fg: .Fill.ForeColor.RGB = fillRGB: .Line.Visible = msoFalse: End With
+    Set tx = ws.Shapes.AddTextbox(msoTextOrientationHorizontal, leftPx, topPx - 20, w, 20)
+    With tx.TextFrame
+        .Characters.text = caption & " - " & Format(ratio, "0%")
+        .HorizontalAlignment = xlHAlignCenter
+        .VerticalAlignment = xlVAlignCenter
+    End With
+    With tx.TextFrame.Characters.Font
+        .Name = "Segoe UI": .Size = 11
+    End With
+    tx.Line.Visible = msoFalse: tx.Fill.Visible = msoFalse
+End Sub
+
+Private Sub Dash_AddKpisTopRight(ByVal ws As Worksheet)
+    ' Sað üst KPI’lar için hücre ankörü: COL_KPI_LEFT & ROW_KPI_TOP (ör. M6)
+    Dim anchor As Range: Set anchor = ws.Range(COL_KPI_LEFT & ROW_KPI_TOP)
+    Dim leftPx As Single: leftPx = anchor.left
+    Dim topPx  As Single: topPx = anchor.Top
+    Dim w As Single: w = 300
+    Dim h As Single: h = 18
+
+    ' Hesaplar
+    Dim total As Long, done As Long, onTime As Long
+    Dim wsM As Worksheet, r As Long, lastRow As Long
+    For Each wsM In ThisWorkbook.Worksheets
+        If IsMeetingSheet(wsM) Then
+            lastRow = wsM.Cells(wsM.Rows.Count, "F").End(xlUp).Row
+            For r = 5 To lastRow
+                If Len(Trim$(wsM.Cells(r, "E").text)) > 0 And Len(Trim$(wsM.Cells(r, "F").text)) > 0 Then
+                    total = total + 1
+                    If Dash_ParsePercent(wsM.Cells(r, "J").value) >= 0.99 Then
+                        done = done + 1
+                        If IsDate(wsM.Cells(r, "I").value) And IsDate(wsM.Cells(r, "H").value) Then
+                            If CDate(wsM.Cells(r, "I").value) <= CDate(wsM.Cells(r, "H").value) Then
+                                onTime = onTime + 1
+                            End If
+                        End If
+                    End If
+                End If
+            Next r
+        End If
+    Next wsM
+
+    ' Çizim (sað üst – logo hizasý civarý)
+    Dash_DrawProgressBarAt ws, leftPx, topPx, w, h, IIf(total > 0, done / total, 0), _
+                           RGB(230, 230, 230), RGB(0, 120, 212), "Genel Tamamlanma Oraný"
+    Dash_DrawProgressBarAt ws, leftPx, topPx + 40, w, h, IIf(total > 0, onTime / total, 0), _
+                           RGB(230, 230, 230), RGB(16, 124, 16), "Zamanýnda Tamamlama Oraný"
+End Sub
+
+' -------------------------
+' ANA: DASHBOARD
+' -------------------------
+Public Sub RebuildDashboard()
+    Dim ws As Worksheet, shpLogo As Shape
+    Dim gridLeft As Single, gridTop As Single
+    Dim x As Single, y As Single, w As Single, h As Single
+
+    Dim sh As Worksheet, hex As String
+    Dim st As TStats
+
+    Dim dict As Object, keys As Variant
+    Dim a As Long, b As Long, r As Long, topN As Long
+    Dim tmp As Variant, tblTop As Range
+    Dim btn As Shape
+
+    ' 1) Sayfa hazýrlýðý
+    On Error Resume Next
+    Set ws = ThisWorkbook.Worksheets("Dashboard")
+    On Error GoTo 0
+    If ws Is Nothing Then
+        Set ws = ThisWorkbook.Worksheets.Add(Before:=ThisWorkbook.Worksheets(1))
+        ws.Name = "Dashboard"
+    End If
+
+    Application.ScreenUpdating = False
+    Dash_ClearSurface ws
+    Dash_HideGridlinesAll
+
+    ' 2) Logo
+    Set shpLogo = Dash_EnsureSingleLogo(ws, 200)
+
+    ' 3) Baþlýk bandý (koyu gri) – hücreye sabit ROW_HEADER
+    Dash_TitleBand ws, "Toplantýlar Dashboard – " & Format(Date, "dd.MM.yyyy")
+
+    ' 4) KPI barlarý – sað üst (logo hizasý civarý, M6)
+    Dash_AddKpisTopRight ws
+
+    ' 5) Butonlar – kart ýzgarasýna göre ortalý (baþlýðýn hemen altýnda, ROW_BUTTONS)
+    Dim btnW As Single, btnH As Single, gapBtn As Single
+    btnW = 180: btnH = 28: gapBtn = 12
+    Dim centerCell As Range: Set centerCell = ws.Range(COL_BUTTONS_CTR & ROW_BUTTONS)
+    Dim btnTop As Single:  btnTop = centerCell.Top
+    Dim gridWidth As Single: gridWidth = (TILE_W * COLS) + (GAP_X * (COLS - 1))
+    Dim btnLeft As Single: btnLeft = Dash_CenterGridLeft(ws, gridWidth) + (gridWidth - (btnW * 2 + gapBtn)) / 2
+
+    Set btn = ws.Shapes.AddShape(msoShapeActionButtonForwardorNext, btnLeft, btnTop, btnW, btnH)
+    With btn
+        .OnAction = "RunOverdueReportsNow"
+        .Fill.ForeColor.RGB = RGB(0, 120, 212)
+        .Line.Visible = msoFalse
+        .TextFrame.Characters.text = "Raporlarý Þimdi Gönder"
+        .TextFrame.HorizontalAlignment = xlHAlignCenter
+        .TextFrame.VerticalAlignment = xlVAlignCenter
+        With .TextFrame.Characters.Font
+            .Name = "Segoe UI": .Size = 11: .Bold = True: .Color = RGB(255, 255, 255)
+        End With
+    End With
+
+    Set btn = ws.Shapes.AddShape(msoShapeActionButtonCustom, btnLeft + btnW + gapBtn, btnTop, 160, btnH)
+    With btn
+        .OnAction = "RebuildDashboard"
+        .Fill.ForeColor.RGB = RGB(16, 124, 16)
+        .Line.Visible = msoFalse
+        .TextFrame.Characters.text = "Dashboard'u Yenile"
+        .TextFrame.HorizontalAlignment = xlHAlignCenter
+        .TextFrame.VerticalAlignment = xlVAlignCenter
+        With .TextFrame.Characters.Font
+            .Name = "Segoe UI": .Size = 11: .Bold = True: .Color = RGB(255, 255, 255)
+        End With
+    End With
+
+    ' 6) Kart ýzgarasý – hücreye sabit ROW_GRID_START
+    w = TILE_W: h = TILE_H
+    gridTop = ws.Range("A" & ROW_GRID_START).Top
+    gridLeft = Dash_CenterGridLeft(ws, (w * COLS) + (GAP_X * (COLS - 1)))
+    y = gridTop
+
+    For Each sh In ThisWorkbook.Worksheets
+        If IsMeetingSheet(sh) Then
+            st.total = 0: st.Open = 0: st.Overdue = 0: st.DueToday = 0
+            Dash_GetSheetStats sh, st
+            hex = GetThemeColorHex(sh.Name)
+
+            x = gridLeft
+            Dash_DrawTile ws, x, y, w, h, sh.Name & " – Toplam", st.total, hex
+            Dash_DrawTile ws, x + (w + GAP_X), y, w, h, "Açýk", st.Open, hex
+            Dash_DrawTile ws, x + 2 * (w + GAP_X), y, w, h, "Gecikmiþ", st.Overdue, hex, _
+                           "SHEET=" & sh.Name & ";TYPE=OVERDUE"
+            Dash_DrawTile ws, x + 3 * (w + GAP_X), y, w, h, "Bugün Planlý", st.DueToday, hex
+
+            y = y + h + GAP_Y
+        End If
+    Next sh
+
+    ' 7) Trend grafiði – hücreye sabit ROW_TREND_TOP, merkezlenmiþ
+    Dash_BuildSysLogTrends ws, ws.Range("A1000")
+
+    Application.ScreenUpdating = True
+End Sub
+
+
+
+/* ===== END FILE: ./Mod_Dashboard_V2.bas ===== */
+
+/* ===== FILE: ./Mod_Report.bas ===== */
+
+Attribute VB_Name = "Mod_Report"
+
+Option Explicit
+'==========================
+' R A P O R   M O D Ü L Ü
+'==========================
+
+'-- Basit URL kontrolü (elde var, koruyoruz) --
+Private Function IsUrl(ByVal s As String) As Boolean
+    s = LCase$(Trim$(s))
+    IsUrl = (left$(s, 7) = "http://" Or left$(s, 8) = "https://")
+End Function
+
+'==========================
+'  GÖRSEL / BAÞLIK YARDIMCILARI
+'==========================
+
+'== Hex (#RRGGBB) -> RGB dönüþtürücü (tema rengi için) ==
+'== Hex (#RRGGBB) -> RGB (ÇAKIÞMASIZ SÜRÜM) ==
+Private Function HexColorToRGB(ByVal hexColor As String) As Long
+    Dim h As String, r As Long, g As Long, b As Long
+    h = Replace$(Trim$(hexColor), "#", "")
+    If Len(h) <> 6 Then
+        HexColorToRGB = RGB(0, 120, 212) ' Varsayýlan mavi
+        Exit Function
+    End If
+    r = CLng("&H" & Mid$(h, 1, 2))
+    g = CLng("&H" & Mid$(h, 3, 2))
+    b = CLng("&H" & Mid$(h, 5, 2))
+    HexColorToRGB = RGB(r, g, b)
+End Function
+
+'== Sayfada TEK logo garantisi: varsa birini býrakýr, fazlalarý siler; yoksa LOGO_PATH/Assets'tan ekler ==
+Private Function EnsureSingleLogo(ByVal ws As Worksheet, Optional ByVal desiredWidth As Single = 230) As Shape
+    On Error Resume Next
+
+    Dim s As Shape, base As Shape
+    ' Mevcut logolarý tara (isim/alt yazýda "logo" geçen resimler)
+    For Each s In ws.Shapes
+        If (s.Type = msoPicture Or s.Type = msoLinkedPicture) Then
+            If InStr(1, LCase$(s.Name), "logo") > 0 Or InStr(1, LCase$(s.AlternativeText), "logo") > 0 Then
+                If base Is Nothing Then
+                    Set base = s
+                    base.Name = "Report_Logo": base.AlternativeText = "Report_Logo"
+                Else
+                    s.Delete ' fazlayý temizle -> çift logo engeli
+                End If
+            End If
+        End If
+    Next s
+
+    ' Hiç logo yoksa ekle
+    If base Is Nothing Then
+        If Len(Trim$(LOGO_PATH)) > 0 And Len(Dir(LOGO_PATH)) > 0 Then
+            Set base = ws.Shapes.AddPicture(LOGO_PATH, False, True, 0, 0, desiredWidth, desiredWidth * 0.45)
+        Else
+            ' Assets sayfasýndaki CompanyLogo varsa kopyala
+            On Error Resume Next
+            ThisWorkbook.Worksheets("Assets").Shapes("CompanyLogo").Copy
+            ws.Paste
+            If Err.Number = 0 Then
+                Set base = ws.Shapes(ws.Shapes.Count)
+                base.LockAspectRatio = msoTrue
+                base.width = desiredWidth
+            End If
+            Err.Clear
+        End If
+    End If
+
+    ' Konum ve öne getir
+    If Not base Is Nothing Then
+        base.LockAspectRatio = msoTrue
+        base.width = desiredWidth
+        base.left = ws.Range("A1").left + 12
+        base.Top = ws.Range("A1").Top + 10
+        base.ZOrder msoBringToFront
+        base.Name = "Report_Logo"
+        base.AlternativeText = "Report_Logo"
+    End If
+
+    On Error GoTo 0
+    Set EnsureSingleLogo = base
+End Function
+
+'== Logonun SAÐINA tema bantlý BÜYÜK baþlýk ==
+
+'== Hex (#RRGGBB) -> RGB dönüþtürücü (tema rengi için) ==
+Private Function HexToRGB(ByVal hexColor As String) As Long
+    Dim h As String, r As Long, g As Long, b As Long
+    h = Replace$(Trim$(hexColor), "#", "")
+    If Len(h) <> 6 Then
+        HexToRGB = RGB(0, 120, 212) ' Varsayýlan: mavi
+        Exit Function
+    End If
+    r = CLng("&H" & Mid$(h, 1, 2))
+    g = CLng("&H" & Mid$(h, 3, 2))
+    b = CLng("&H" & Mid$(h, 5, 2))
+    HexToRGB = RGB(r, g, b)
+End Function
+
+'== Rengi koyulaþtýr (0..1 faktör; 0=siyah, 1=ayný renk) ==
+Private Function DarkenColor(ByVal c As Long, Optional ByVal factor As Double = 0.7) As Long
+    Dim r As Long, g As Long, b As Long
+    r = (c And &HFF)
+    g = (c \ &H100) And &HFF
+    b = (c \ &H10000) And &HFF
+    If factor < 0 Then factor = 0
+    If factor > 1 Then factor = 1
+    DarkenColor = RGB(r * factor, g * factor, b * factor)
+End Function
+
+'== Logonun ALTINDA, sayfa geniþliðinde KOYU bant + ORTALANMIÞ beyaz baþlýk ==
+Private Sub StampHeaderBand(ByVal ws As Worksheet, ByVal titleText As String, ByVal themeHex As String)
+    On Error Resume Next
+    ' Eski baþlýk/bant varsa temizle
+    Dim shp As Shape, i As Long
+    For i = ws.Shapes.Count To 1 Step -1
+        Set shp = ws.Shapes(i)
+        If LCase$(shp.Name) Like "*report_header*" Or LCase$(shp.Name) Like "*report_header_band*" Then shp.Delete
+    Next i
+
+    ' Logo: yükseklik hizasý için
+    Dim logo As Shape, topPos As Single
+    On Error Resume Next: Set logo = ws.Shapes("Report_Logo"): On Error GoTo 0
+    If Not logo Is Nothing Then
+        topPos = logo.Top + logo.Height + 10   ' << LOGONUN ALTINA
+    Else
+        topPos = ws.Range("A1").Top + 60       ' logo yoksa güvenli offset
+    End If
+
+    ' Sayfa sol/sað sýnýr (UsedRange)
+    Dim firstLeft As Single, lastCol As Long, rightBound As Single, widthPx As Single
+    firstLeft = ws.Range("A1").left + 5
+    lastCol = ws.UsedRange.Columns(ws.UsedRange.Columns.Count).Column
+    rightBound = ws.Cells(1, lastCol).left + ws.Cells(1, lastCol).width
+    widthPx = rightBound - firstLeft - 5
+
+    ' Sekme rengi (yoksa tema) + koyulaþtýrma
+    Dim tabCol As Long, bandCol As Long
+    tabCol = ws.Tab.Color
+    If tabCol = 0 Then
+        bandCol = HexColorToRGB(themeHex)      ' Mod_Report’taki HexColorToRGB kullanýlmalý
+    Else
+        bandCol = tabCol
+    End If
+    bandCol = DarkenColor(bandCol, 0.7)
+
+    ' Bant
+    Dim band As Shape
+    Set band = ws.Shapes.AddShape(msoShapeRectangle, firstLeft, topPos, widthPx, 50)
+    With band
+        .Name = "Report_Header_Band"
+        .Line.Visible = msoFalse
+        .Fill.Visible = msoTrue
+        .Fill.ForeColor.RGB = bandCol
+        .ZOrder msoSendToBack
+    End With
+
+    ' Metin kutusu: bant geniþliði kadar ve ORTALANMIÞ
+    Dim hdr As Shape
+    Set hdr = ws.Shapes.AddTextbox(msoTextOrientationHorizontal, firstLeft, topPos, widthPx, 50)
+    With hdr
+        .Name = "Report_Header"
+        .TextFrame.Characters.text = titleText
+        .TextFrame.HorizontalAlignment = xlHAlignCenter
+        .TextFrame.VerticalAlignment = xlVAlignCenter
+        With .TextFrame.Characters.Font
+            .Name = "Segoe UI"
+            .Size = 24
+            .Bold = True
+            .Color = RGB(255, 255, 255)
+        End With
+        .Line.Visible = msoFalse
+        .Fill.Visible = msoFalse
+        .ZOrder msoBringToFront
+    End With
+End Sub
+
+
+'==========================
+'  SYSLOG / ALICI YARDIMCILARI  (mevcut iþlevler korunur)
+'==========================
+
+Private Function EnsureSysLogSheet() As Worksheet
+    Dim ws As Worksheet
+    On Error Resume Next
+    Set ws = ThisWorkbook.Worksheets("SysLog")
+    On Error GoTo 0
+    If ws Is Nothing Then
+        Set ws = ThisWorkbook.Worksheets.Add(After:=ThisWorkbook.Worksheets(ThisWorkbook.Worksheets.Count))
+        ws.Name = "SysLog"
+        ws.Range("A1:D1").value = Array("Tarih", "Email", "Sheet", "Note")
+        ws.Columns("A:D").HorizontalAlignment = xlLeft
+        ws.Visible = xlSheetVeryHidden
+    Else
+        If Trim$(CStr(ws.Cells(1, "A").value)) <> "Tarih" Then
+            ws.Range("A1:D1").value = Array("Tarih", "Email", "Sheet", "Note")
+        End If
+    End If
+    Set EnsureSysLogSheet = ws
+End Function
+
+' Mod_Report.bas içindeki sürümün yerine
+Private Function HasDailyMailSent(ByVal email As String, Optional ByVal scope As String = "global", Optional ByVal sheetName As String = "") As Boolean
+    Dim ws As Worksheet, lastRow As Long, i As Long, d0 As Long, di As Long, e As String, sh As String
+    Set ws = EnsureSysLogSheet()
+    lastRow = ws.Cells(ws.Rows.Count, "A").End(xlUp).Row
+    d0 = CLng(Date)
+    For i = 2 To lastRow
+        If Not IsEmpty(ws.Cells(i, "A").value) Then
+            On Error Resume Next: di = CLng(CDate(ws.Cells(i, "A").value)): On Error GoTo 0
+            If di = d0 Then
+                e = LCase$(Trim$(CStr(ws.Cells(i, "B").value)))
+                sh = CStr(ws.Cells(i, "C").value)
+                If LCase$(Trim$(email)) = e Then
+                    If LCase$(scope) = "sheet" Then
+                        If sh = sheetName Then HasDailyMailSent = True: Exit Function
+                    Else
+                        HasDailyMailSent = True: Exit Function
+                    End If
+                End If
+            End If
+        End If
+    Next i
+End Function
+
+Private Sub MarkDailyMailSent(ByVal email As String, ByVal sheetName As String)
+    Dim ws As Worksheet, nextRow As Long
+    Set ws = EnsureSysLogSheet()
+    nextRow = ws.Cells(ws.Rows.Count, "A").End(xlUp).Row + 1
+    ws.Cells(nextRow, "A").value = Date
+    ws.Cells(nextRow, "B").value = email
+    ws.Cells(nextRow, "C").value = sheetName
+    ws.Cells(nextRow, "D").value = "OverdueReport"
+End Sub
+
+Private Function BuildOverdueRecipients(ByVal ws As Worksheet) As Collection
+    Dim col As New Collection
+    Dim lastRow As Long, r As Long
+    Dim vJ As Variant, planDate As Variant, addr As String
+    lastRow = ws.Cells(ws.Rows.Count, "F").End(xlUp).Row
+    For r = 5 To lastRow
+        vJ = ws.Cells(r, "J").Value2
+        planDate = ws.Cells(r, "H").value
+        If IsNumeric(vJ) Then
+            If vJ < 0.99 Then
+                If IsDate(planDate) Then
+                    If CDate(planDate) < Date Then
+                        addr = ResolveRecipient(CStr(ws.Cells(r, "F").value))
+                        If Len(addr) > 0 Then
+                            If Not HasDailyMailSent(addr, "sheet", ws.Name) Then
+                                On Error Resume Next
+                                col.Add addr, key:=LCase$(addr)
+                                On Error GoTo 0
+                            End If
+                        End If
+                    End If
+                End If
+            End If
+        End If
+    Next r
+    Set BuildOverdueRecipients = col
+End Function
+
+'==========================
+'  RAPOR GÖNDERÝMÝ (mevcut akýþ korunur)
+'==========================
+
+Private Function ExportSheetPDF(ByVal ws As Worksheet) As String
+    Dim path As String
+    path = Environ$("TEMP") & "\" & ws.Name & "_" & Format(Date, "yyyymmdd") & ".pdf"
+    On Error Resume Next
+    ws.ExportAsFixedFormat Type:=xlTypePDF, _
+        Filename:=path, Quality:=xlQualityStandard, _
+        IncludeDocProperties:=True, IgnorePrintAreas:=False, _
+        OpenAfterPublish:=False
+    If Err.Number <> 0 Then path = ""
+    On Error GoTo 0
+    ExportSheetPDF = path
+End Function
+
+
+
+Public Sub SendOverdueReportForSheet(ByVal ws As Worksheet)
+    Dim recipients As Collection, i As Long
+    Dim OutApp As Object, OutMail As Object
+    Dim subjectText As String, html As String, pdfPath As String
+    Dim lastRow As Long, r As Long
+    Dim vJ As Variant, planDate As Variant
+    Dim totalTasks As Long, openTasks As Long, overdueNow As Long
+    Dim closeSum As Double, closeCnt As Long, avgClose As Double
+    Dim themeHex As String
+
+    ' -- Kiþi bazlý istatistik sözlükleri --
+    Dim dTotal As Object, dOpen As Object, dOver As Object
+    Dim dCloseSum As Object, dCloseCnt As Object
+    Set dTotal = CreateObject("Scripting.Dictionary")
+    Set dOpen = CreateObject("Scripting.Dictionary")
+    Set dOver = CreateObject("Scripting.Dictionary")
+    Set dCloseSum = CreateObject("Scripting.Dictionary")
+    Set dCloseCnt = CreateObject("Scripting.Dictionary")
+
+    ' 1) Alýcýlar (ayný kiþi günde 1 kez)
+    Set recipients = BuildOverdueRecipients(ws)
+    If recipients Is Nothing Then Exit Sub
+    If recipients.Count = 0 Then Exit Sub
+
+    ' 2) Metrikler
+    lastRow = ws.Cells(ws.Rows.Count, "F").End(xlUp).Row
+    For r = 5 To lastRow
+        Dim hasE As Boolean, hasF As Boolean, personKey As String
+        hasE = (Len(Trim$(ws.Cells(r, "E").text)) > 0)
+        hasF = (Len(Trim$(ws.Cells(r, "F").text)) > 0)
+        vJ = ws.Cells(r, "J").Value2
+        planDate = ws.Cells(r, "H").value
+
+        personKey = Trim$(ws.Cells(r, "F").text)
+        If personKey = "" Then personKey = "(Boþ)"
+
+        ' Toplam görev (E & F dolu)
+        If hasE And hasF Then
+            totalTasks = totalTasks + 1
+            If Not dTotal.Exists(personKey) Then dTotal.Add personKey, 0
+            dTotal(personKey) = dTotal(personKey) + 1
+        End If
+
+        ' Açýk görev (J<%99)
+        If hasE And hasF And IsNumeric(vJ) Then
+            If vJ < 0.99 Then
+                openTasks = openTasks + 1
+                If Not dOpen.Exists(personKey) Then dOpen.Add personKey, 0
+                dOpen(personKey) = dOpen(personKey) + 1
+            End If
+        End If
+
+        ' Gecikmiþ görev (J<%99 ve H<Bugün)
+        If hasE And hasF And IsNumeric(vJ) And IsDate(planDate) Then
+            If vJ < 0.99 And CDate(planDate) < Date Then
+                overdueNow = overdueNow + 1
+                If Not dOver.Exists(personKey) Then dOver.Add personKey, 0
+                dOver(personKey) = dOver(personKey) + 1
+            End If
+        End If
+
+        ' Ortalama kapanma süresi (tamamlananlar) -> hem genel hem kiþi bazlý
+        If IsNumeric(vJ) And vJ >= 0.99 Then
+            If IsDate(ws.Cells(r, "I").value) And IsDate(ws.Cells(r, "G").value) Then
+                Dim diff As Long
+                diff = DateDiff("d", CDate(ws.Cells(r, "G").value), CDate(ws.Cells(r, "I").value))
+                If diff < 0 Then diff = 0
+                ' Genel
+                closeSum = closeSum + diff
+                closeCnt = closeCnt + 1
+                ' Kiþi bazlý
+                If Not dCloseSum.Exists(personKey) Then dCloseSum.Add personKey, 0
+                If Not dCloseCnt.Exists(personKey) Then dCloseCnt.Add personKey, 0
+                dCloseSum(personKey) = dCloseSum(personKey) + diff
+                dCloseCnt(personKey) = dCloseCnt(personKey) + 1
+            End If
+        End If
+    Next r
+    If closeCnt > 0 Then avgClose = closeSum / closeCnt Else avgClose = 0
+
+    ' 3) Tema rengi (Mod_Settings) -> hex
+    themeHex = GetThemeColorHex(ws.Name)
+
+    ' 4) Mail gövdesi (üst bant + iki özet + gecikmiþler tablosu)
+    html = ""
+    html = html & "<div style='background:" & themeHex & ";color:#ffffff;padding:10px 14px;"
+    html = html & "font-family:Segoe UI,Arial,sans-serif;font-size:12pt;font-weight:600;'>"
+    html = html & Format(Date, "dd.MM.yyyy") & " - Geciken Görevler Raporu / " & ws.Name & " Toplantýsý</div>"
+
+    html = html & "<div style='font-family:Segoe UI,Arial,sans-serif;font-size:10.5pt;'>"
+    html = html & "<p>Sayýn Yetkili,</p>"
+    html = html & "<p>Bugün itibarýyla geciken görevlerin raporu ekte (PDF) ve aþaðýda özet/tablo halinde paylaþýlmýþtýr.</p>"
+
+    ' --- Kýsa Özet - GENEL ---
+    html = html & "<div style='border-left:4px solid " & themeHex & ";padding:8px 12px;background:#f7f9fc;'>"
+    html = html & "<b>Kýsa Özet - Genel</b><br>"
+    html = html & "• Toplam Görev Sayýsý: " & CStr(totalTasks) & "<br>"
+    html = html & "• Açýk Görev Sayýsý: " & CStr(openTasks) & "<br>"
+    html = html & "• Anlýk Geciken Görev Sayýsý: " & CStr(overdueNow) & "<br>"
+    html = html & "• Ortalama Görev Kapanma Süresi: " & Format(avgClose, "0.0") & " gün"
+    html = html & "</div><br>"
+
+    ' --- Kýsa Özet - PERSONEL (Top 4) -> Açýk görev sayýsýna göre sýralama ---
+    Dim top4 As Variant, idx As Long, key As String
+    top4 = Top4ByOpen(dOpen, dOver, dTotal)
+
+    html = html & "<div style='border-left:4px solid " & themeHex & ";padding:8px 12px;background:#f7f9fc;'>"
+    html = html & "<b>Kýsa Özet - Personel (Top 4)</b><br>"
+
+    html = html & "<table border='1' cellspacing='0' cellpadding='6' style='border-collapse:collapse;"
+    html = html & "font-family:Segoe UI,Arial,sans-serif;font-size:10.5pt;'>"
+    html = html & "<tr style='background:" & themeHex & ";color:#ffffff;'>"
+    html = html & "<th align='left'>Sorumlu</th>"
+    html = html & "<th align='right'>Toplam</th>"
+    html = html & "<th align='right'>Açýk</th>"
+    html = html & "<th align='right'>Gecikmiþ</th>"
+    html = html & "<th align='right'>Ort. Kapanma</th></tr>"
+
+    If IsArray(top4) Then
+        For idx = LBound(top4) To UBound(top4)
+            key = CStr(top4(idx))
+            Dim nmDisp As String, t As Long, o As Long, ov As Long, av As String
+            nmDisp = ResolveFullName(key) ' Kod yerine Ad Soyadý
+
+            t = IIf(dTotal.Exists(key), dTotal(key), 0)
+            o = IIf(dOpen.Exists(key), dOpen(key), 0)
+            ov = IIf(dOver.Exists(key), dOver(key), 0)
+
+            If dCloseCnt.Exists(key) And dCloseCnt(key) > 0 Then
+                av = Format(dCloseSum(key) / dCloseCnt(key), "0.0") & " gün"
+            Else
+                av = "—"
+            End If
+
+            html = html & "<tr><td>" & nmDisp & "</td>"
+            html = html & "<td align='right'>" & t & "</td>"
+            html = html & "<td align='right'>" & o & "</td>"
+            html = html & "<td align='right'>" & ov & "</td>"
+            html = html & "<td align='right'>" & av & "</td></tr>"
+        Next idx
+    Else
+        html = html & "<tr><td colspan='5' align='center'>Veri bulunamadý</td></tr>"
+    End If
+
+    html = html & "</table></div><br>"
+
+    ' --- Gecikmiþler detay tablosu (Notlar L ve Sorumlu = Ad Soyad) ---
+    html = html & "<table border='1' cellspacing='0' cellpadding='6' style='border-collapse:collapse;"
+    html = html & "font-family:Segoe UI,Arial,sans-serif;font-size:10.5pt;'>"
+    html = html & "<tr style='background:" & themeHex & ";color:#ffffff;'>"
+    html = html & "<th align='left'>Konu/Madde (D)</th>"
+    html = html & "<th align='left'>Görev/Aksiyon (E)</th>"
+    html = html & "<th align='left'>Planlanan Tarih (H)</th>"
+    html = html & "<th align='left'>Sorumlu (F)</th>"
+    html = html & "<th align='left'>Notlar (L)</th>"
+    html = html & "<th align='left'>% Tamamlanma (J)</th>"
+    html = html & "</tr>"
+
+    For r = 5 To lastRow
+        vJ = ws.Cells(r, "J").Value2
+        planDate = ws.Cells(r, "H").value
+        If IsNumeric(vJ) And IsDate(planDate) Then
+            If vJ < 0.99 And CDate(planDate) < Date Then
+                Dim respDisp As String
+                respDisp = ResolveFullName(ws.Cells(r, "F").text)
+
+                html = html & "<tr>"
+                html = html & "<td>" & ws.Cells(r, "D").text & "</td>"
+                html = html & "<td>" & ws.Cells(r, "E").text & "</td>"
+                html = html & "<td>" & Format(ws.Cells(r, "H").value, "dd.MM.yyyy") & "</td>"
+                html = html & "<td>" & respDisp & "</td>"
+                html = html & "<td>" & ws.Cells(r, "L").text & "</td>"
+                html = html & "<td>" & Format(ws.Cells(r, "J").value, "0%") & "</td>"
+                html = html & "</tr>"
+            End If
+        End If
+    Next r
+    html = html & "</table>"
+    html = html & "<p>Dokümana hýzlý eriþim: <a href='" & ONEDRIVE_LINK & "'>buraya týklayýn</a>.</p>"
+    html = html & "<p>Ýyi çalýþmalar.</p></div>"
+
+    ' 5) Konu ve PDF
+    subjectText = Format(Date, "dd.MM.yyyy") & " - Geciken Görevler Raporu / " & ws.Name & " Toplantýsý"
+    pdfPath = ExportOverduePDF_FilteredCopy(ws)
+
+    ' 6) Outlook gönderimi
+    Set OutApp = CreateObject("Outlook.Application")
+    Set OutMail = OutApp.CreateItem(0)
+    With OutMail
+        For i = 1 To recipients.Count
+            .recipients.Add recipients(i)
+        Next i
+        Call AddCC_ForReport(OutMail, ws.Name)
+        .Subject = subjectText
+        .BodyFormat = 2
+        .htmlBody = html
+        If Len(pdfPath) > 0 Then .Attachments.Add pdfPath
+        .Save
+        .Send
+    End With
+
+    For i = 1 To recipients.Count
+        Call MarkDailyMailSent(recipients(i), ws.Name)
+       Next i
+
+CleanExit:
+    On Error Resume Next
+    Set OutMail = Nothing
+    Set OutApp = Nothing
+    Exit Sub
+    
+End Sub
+
+
+'================== Yardýmcýlar: Top 4 (Açýk göreve göre) + Ad Soyadý çözümleme ==================
+
+' Top4: Önce Açýk (desc), sonra Gecikmiþ (desc), sonra Toplam (desc)
+Private Function Top4ByOpen(ByVal dOpen As Object, ByVal dOver As Object, ByVal dTotal As Object) As Variant
+    Dim unionDict As Object, k As Variant, keys As Variant
+    Set unionDict = CreateObject("Scripting.Dictionary")
+
+    ' Tüm kiþi anahtarlarýnýn birleþimi
+    For Each k In dTotal.keys: unionDict(k) = True: Next k
+    For Each k In dOpen.keys:  unionDict(k) = True: Next k
+    For Each k In dOver.keys:  unionDict(k) = True: Next k
+
+    If unionDict.Count = 0 Then
+        Top4ByOpen = Array()
+        Exit Function
+    End If
+
+    keys = unionDict.keys
+
+    ' Küçük veri setleri için basit sýralama: desc (Açýk -> Gecikmiþ -> Toplam)
+    Dim i As Long, j As Long, tmp As Variant
+    For i = LBound(keys) To UBound(keys) - 1
+        For j = i + 1 To UBound(keys)
+            If CompareByOpen(keys(i), keys(j), dOpen, dOver, dTotal) < 0 Then
+                tmp = keys(i): keys(i) = keys(j): keys(j) = tmp
+            End If
+        Next j
+    Next i
+
+    ' Ýlk 4 kiþiyi döndür
+    Dim n As Long: n = Application.Min(4, UBound(keys) - LBound(keys) + 1)
+    ReDim Preserve keys(0 To n - 1)
+    Top4ByOpen = keys
+End Function
+
+' Sýralama kriteri: Açýk v, eþitse Gecikmiþ v, yine eþitse Toplam v
+Private Function CompareByOpen(ByVal a As String, ByVal b As String, _
+                               ByVal dOpen As Object, ByVal dOver As Object, ByVal dTotal As Object) As Long
+    Dim ao As Long, bo As Long, ag As Long, bg As Long, at As Long, bt As Long
+    ao = IIf(dOpen.Exists(a), dOpen(a), 0)
+    bo = IIf(dOpen.Exists(b), dOpen(b), 0)
+    If ao <> bo Then CompareByOpen = Sgn(ao - bo): Exit Function
+
+    ag = IIf(dOver.Exists(a), dOver(a), 0)
+    bg = IIf(dOver.Exists(b), dOver(b), 0)
+    If ag <> bg Then CompareByOpen = Sgn(ag - bg): Exit Function
+
+    at = IIf(dTotal.Exists(a), dTotal(a), 0)
+    bt = IIf(dTotal.Exists(b), dTotal(b), 0)
+    CompareByOpen = Sgn(at - bt)
+End Function
+
+'==========================
+'  PDF ÜRETÝMÝ — TEK SAYFA / LANDSCAPE
+'==========================
+
+Private Function ExportOverduePDF_FilteredCopy(ByVal ws As Worksheet) As String
+    Dim tmp As Worksheet, lastRow As Long, lastCol As Long, r As Long
+    Dim vJ As Variant, planDate As Variant
+    Dim path As String, newName As String, startRow As Long
+    Dim themeHex As String
+    Dim printRange As Range
+
+    On Error GoTo Fail
+    Application.ScreenUpdating = False
+    Application.DisplayAlerts = False
+
+    ' 1) Kopya üret (stiller korunur)
+    ws.Copy After:=ws
+    Set tmp = ActiveSheet
+    newName = "__tmp_pdf_" & left$(ws.Name, 20) & "_" & Format(Now, "hhmmss")
+    On Error Resume Next: tmp.Name = newName: Err.Clear: On Error GoTo 0
+
+    ' 2) Yalnýz geciken satýrlar kalsýn
+    startRow = 5
+    lastRow = tmp.Cells(tmp.Rows.Count, "F").End(xlUp).Row
+    For r = lastRow To startRow Step -1
+        vJ = tmp.Cells(r, "J").Value2
+        planDate = tmp.Cells(r, "H").value
+        If IsNumeric(vJ) And IsDate(planDate) Then
+            If Not (vJ < 0.99 And CDate(planDate) < Date) Then
+                tmp.Rows(r).Delete
+            End If
+        Else
+            tmp.Rows(r).Delete
+        End If
+    Next r
+
+    ' 3) Üste daha fazla boþluk (logo/baþlýk için)
+    tmp.Rows(1).Resize(8).Insert            ' 8 satýr boþluk
+    ' Döngüsüz toplu satýr yüksekliði — daha stabil
+    tmp.Rows("1:8").RowHeight = 22
+
+    ' 4) Logo + Baþlýk (tek logo, koyu bantta ortalanmýþ baþlýk)
+    Dim logo As Shape
+    Set logo = EnsureSingleLogo(tmp, 230)    ' tek logo ve büyük yerleþim (mevcut yordamýnýza uygun) [1](https://isotecsolar.sharepoint.com/_layouts/15/Doc.aspx?sourcedoc=%7B7632AC1B-A852-4283-BD26-ABDCD6BFE201%7D&file=Genel_Aksiyon_Listesi.xlsm&action=default&mobileredirect=true)
+    themeHex = GetThemeColorHex(ws.Name)     ' tema rengi (Mod_Settings) [2](https://isotecsolar-my.sharepoint.com/personal/ceyhun_bostanci_isotec_com_tr/Documents/Microsoft%20Copilot%20Chat%20Dosyalar%C4%B1/Module_Mail.rtf)
+    Dim headerText As String
+    headerText = Format(Date, "dd.MM.yyyy") & " - Geciken Görevler Raporu / " & ws.Name & " Toplantýsý"
+    Call StampHeaderBand(tmp, headerText, themeHex)  ' ortalanmýþ koyu bant sürümünü kullanýyoruz
+
+    ' 5) Baský ayarlarýný temizle + tek sayfa LANDSCAPE
+    With tmp.PageSetup
+        .PrintTitleRows = ""
+        .PrintTitleColumns = ""
+        .PrintArea = ""
+        .Orientation = xlLandscape
+        .Zoom = False
+        .FitToPagesWide = 1
+        .FitToPagesTall = 1        ' tek sayfa zorlamasý
+        .CenterHorizontally = True
+        .CenterVertically = False
+        .LeftMargin = Application.InchesToPoints(0.35)
+        .RightMargin = Application.InchesToPoints(0.35)
+        .TopMargin = Application.InchesToPoints(0.3)
+        .BottomMargin = Application.InchesToPoints(0.3)
+        .PrintGridlines = False
+    End With
+
+    ' 6) Sayfa sonlarýný sýfýrla
+    tmp.ResetAllPageBreaks
+
+    ' 7) Baský alaný (üst boþluk + tüm tablo)
+    lastCol = tmp.UsedRange.Columns(tmp.UsedRange.Columns.Count).Column
+    lastRow = tmp.Cells(tmp.Rows.Count, "F").End(xlUp).Row
+    If lastRow < startRow Then
+        ExportOverduePDF_FilteredCopy = ""
+        GoTo CleanExit
+    End If
+    Set printRange = tmp.Range(tmp.Cells(1, 1), tmp.Cells(lastRow, lastCol))
+    tmp.PageSetup.PrintArea = printRange.Address
+
+    ' 8) PDF üret
+    path = Environ$("TEMP") & "\" & ws.Name & "_Overdue_" & Format(Date, "yyyymmdd") & ".pdf"
+    tmp.ExportAsFixedFormat Type:=xlTypePDF, Filename:=path, _
+        Quality:=xlQualityStandard, IncludeDocProperties:=True, _
+        IgnorePrintAreas:=False, OpenAfterPublish:=False
+
+    ExportOverduePDF_FilteredCopy = path
+
+CleanExit:
+    On Error Resume Next
+    tmp.Delete
+    Application.DisplayAlerts = True
+    Application.ScreenUpdating = True
+    On Error GoTo 0
+    Exit Function
+
+Fail:
+    On Error Resume Next
+    If Not tmp Is Nothing Then tmp.Delete
+    Application.DisplayAlerts = True
+    Application.ScreenUpdating = True
+    ExportOverduePDF_FilteredCopy = ""
+End Function
+
+
+
+/* ===== END FILE: ./Mod_Report.bas ===== */
+
+/* ===== FILE: ./Mod_Resolver.bas ===== */
+
+Attribute VB_Name = "Mod_Resolver"
+
+'== Mod_Resolver.bas ==
+Option Explicit
+
+' Kod/ad/e-posta giriþi -> "Adý Soyadý" (Data sayfasý: A=Kod, B=Ad Soyad, D=Mail)
+Public Function ResolveFullName(ByVal responsibleInput As String) As String
+    Dim ws As Worksheet, f As Range, s As String, mail As String
+    s = Trim$(responsibleInput)
+    If Len(s) = 0 Then ResolveFullName = "": Exit Function
+
+    On Error Resume Next
+    Set ws = ThisWorkbook.Worksheets("Data")
+    On Error GoTo 0
+    If ws Is Nothing Then
+        ResolveFullName = responsibleInput
+        Exit Function
+    End If
+
+    ' 1) Kod ile TAM eþleþme (A sütunu)
+    Set f = ws.Columns("A").Find(What:=s, LookIn:=xlValues, LookAt:=xlWhole, MatchCase:=False)
+    If Not f Is Nothing Then
+        ResolveFullName = CStr(f.Offset(0, 1).value) ' B: Ad Soyad
+        Exit Function
+    End If
+
+    ' 2) Eðer giriþ e-posta içeriyorsa D sütununda ara
+    mail = LCase$(s)
+    mail = Replace$(mail, "mailto:", "")
+    mail = Replace$(mail, "<", "")
+    mail = Replace$(mail, ">", "")
+    If InStr(mail, " ") > 0 Then mail = left$(mail, InStr(mail, " ") - 1)
+    If InStr(mail, "@") > 0 Then
+        Set f = ws.Columns("D").Find(What:=mail, LookIn:=xlValues, LookAt:=xlPart, MatchCase:=False)
+        If Not f Is Nothing Then
+            ResolveFullName = CStr(f.Offset(0, -2).value) ' D->B = -2
+            Exit Function
+        End If
+    End If
+
+    ' 3) Ad ile KISMÝ arama (B sütunu)
+    Set f = ws.Columns("B").Find(What:=s, LookIn:=xlValues, LookAt:=xlPart, MatchCase:=False)
+    If Not f Is Nothing Then
+        ResolveFullName = CStr(f.value)
+        Exit Function
+    End If
+
+    ' 4) Bulunamazsa olduðu gibi döndür
+       ResolveFullName = responsibleInput
+       
+End Function
+
+
+/* ===== END FILE: ./Mod_Resolver.bas ===== */
+
+/* ===== FILE: ./Mod_Schedule.bas ===== */
+
+Attribute VB_Name = "Mod_Schedule"
+
+'== Mod_Schedule.bas ==
+Option Explicit
+
+' 17:00 "Geciken Görevler" zamanlayýcý için global randevu
+Public gNextRun As Date
+
+' 08:15 "Bugün Ýþ Planý" zamanlayýcý için global randevu
+Public gNextRunPlan As Date
+
+' ---------- 17:00 GECÝKEN GÖREV RAPORLARI ----------
+Public Sub ScheduleDailyOverdueReports()
+    Dim runTime As Date, wd As Integer
+    wd = Weekday(Date, vbMonday)
+    runTime = Date + TimeValue("17:00:00")
+    If wd <= 5 Then
+        If Now > runTime Then runTime = Date + 1 + TimeValue("17:00:00")
+    Else
+        runTime = Date + (8 - wd) + TimeValue("17:00:00")
+    End If
+    gNextRun = runTime
+    Application.onTime EarliestTime:=gNextRun, Procedure:="RunDailyOverdueReports", Schedule:=True
+End Sub
+
+Public Sub RunDailyOverdueReports()
+    Dim ws As Worksheet
+    For Each ws In ThisWorkbook.Worksheets
+        If IsMeetingSheet(ws) Then
+            SendOverdueReportForSheet ws
+        End If
+    Next ws
+    ScheduleDailyOverdueReports  ' bir sonraki randevuyu kur
+End Sub
+
+Public Sub RunOverdueReportsNow()
+    RunDailyOverdueReports
+End Sub
+
+Public Sub CancelDailySchedule()
+    On Error Resume Next
+    If gNextRun <> 0 Then
+        Application.onTime EarliestTime:=gNextRun, Procedure:="RunDailyOverdueReports", Schedule:=False
+        gNextRun = 0
+    End If
+End Sub
+
+' ---------- 08:15 BUGÜN ÝÞ PLANI ----------
+Public Sub ScheduleDailyTodayPlans()
+    Dim runTime As Date, wd As Integer
+    wd = Weekday(Date, vbMonday)
+    runTime = Date + TimeValue("08:15:00")
+    If wd <= 5 Then
+        If Now > runTime Then runTime = Date + 1 + TimeValue("08:15:00")
+    Else
+        runTime = Date + (8 - wd) + TimeValue("08:15:00")
+    End If
+    gNextRunPlan = runTime
+    Application.onTime EarliestTime:=gNextRunPlan, Procedure:="RunDailyTodayPlans", Schedule:=True
+End Sub
+
+Public Sub RunDailyTodayPlans()
+    SendTodayPlansForAll
+    ScheduleDailyTodayPlans  ' bir sonraki randevuyu kur
+End Sub
+
+Public Sub CancelDailyTodayPlans()
+       On Error Resume Next
+    If gNextRunPlan <> 0 Then
+        Application.onTime EarliestTime:=gNextRunPlan, Procedure:="RunDailyTodayPlans", Schedule:=False
+        gNextRunPlan = 0
+    End If
+End Sub
+
+/* ===== END FILE: ./Mod_Schedule.bas ===== */
+
+/* ===== FILE: ./Mod_Settings.bas ===== */
+
+Attribute VB_Name = "Mod_Settings"
+
+'== Mod_Settings.bas ==
+Option Explicit
+
+' -- AYARLAR --
+Public Const ONEDRIVE_LINK As String = _
+    "https://isotecsolar.sharepoint.com/:x:/g/IQAbrDJ2UqiDQr0mq9zWv-IBAbagXQ95upAHjnfof9XWS0U?e=4P2CXX"
+
+Public Const CC_LIST As String = "ceyhun@isotec.com.tr; halisahmet.orhan@isotec.com.tr"
+
+' LOGO (PNG önerilir) - yerel yol hýzlýdýr; yoksa Assets/CompanyLogo kullanýlacak
+Public Const LOGO_PATH As String = _
+    "C:\Users\ceyhun.bostanci\OneDrive - ISOTEC Enerji A.Þ\Masaüstü\Resim1.png"
+
+' Tema renkleri
+Public Function GetThemeColorHex(ByVal sheetName As String) As String
+    Select Case LCase$(sheetName)
+        Case LCase$("Koordinasyon"): GetThemeColorHex = "#0078D4"
+        Case LCase$("Sipariþ"), LCase$("Siparis"): GetThemeColorHex = "#107C10"
+        Case LCase$("Þikayet"), LCase$("Sikayet"): GetThemeColorHex = "#C50F1F"
+        Case LCase$("Atýl_Stok"), LCase$("Atil_Stok"): GetThemeColorHex = "#8E562E"
+        Case LCase$("Kalite"): GetThemeColorHex = "#2F5597"
+        Case Else: GetThemeColorHex = "#2F5597"
+    End Select
+End Function
+
+' Toplantý sayfasý mý?
+Public Function IsMeetingSheet(ByVal sh As Object) As Boolean
+    Select Case sh.Name
+        Case "Koordinasyon", "Sipariþ", "Þikayet", "Atýl_Stok", "Kalite"
+            IsMeetingSheet = True
+        Case Else
+            IsMeetingSheet = False
+    End Select
+End Function
+
+
+
+/* ===== END FILE: ./Mod_Settings.bas ===== */
+
+/* ===== FILE: ./Mod_TodayPlan.bas ===== */
+
+Attribute VB_Name = "Mod_TodayPlan"
+
+'== Mod_TodayPlan.bas ==
+Option Explicit
+
+' --- Yardýmcý: Bugün planlý mý? ---
+Private Function IsDueToday(ByVal v As Variant) As Boolean
+    If IsDate(v) Then
+        IsDueToday = (CLng(CDate(v)) = CLng(Date))
+    End If
+End Function
+
+' --- Kiþiye göre bugün plan listesi topla (tüm toplantý sayfalarý) ---
+Private Function CollectTodayTasksForPerson(ByVal personKey As String) As Collection
+    Dim ws As Worksheet, r As Long, lastRow As Long
+    Dim col As New Collection
+    Dim vJ As Variant
+    For Each ws In ThisWorkbook.Worksheets
+        If IsMeetingSheet(ws) Then ' Koordinasyon, Sipariþ, Þikayet, Atýl_Stok, Kalite
+            lastRow = ws.Cells(ws.Rows.Count, "F").End(xlUp).Row
+            For r = 5 To lastRow  ' veri 5. satýrdan baþlýyor
+                If Trim$(ws.Cells(r, "F").text) <> "" Then
+                    If StrComp(Trim$(ws.Cells(r, "F").text), Trim$(personKey), vbTextCompare) = 0 Then
+                        vJ = ws.Cells(r, "J").Value2
+                        If IsNumeric(vJ) Then
+                            If vJ < 0.99 And IsDueToday(ws.Cells(r, "H").value) Then
+                                ' ws, r sakla
+                                col.Add Array(ws.Name, r)
+                            End If
+                        End If
+                    End If
+                End If
+            Next r
+        End If
+    Next ws
+    Set CollectTodayTasksForPerson = col
+End Function
+
+' --- Bugün iþ planý: tek mail (TO: kiþi, CC: CB) ---
+Private Function SendTodayPlanMail(ByVal personKey As String, ByVal items As Collection) As Boolean
+    Dim toAddr As String, fullName As String
+    Dim OutApp As Object, OutMail As Object, rec As Object
+    Dim html As String, i As Long, it, ws As Worksheet, r As Long
+    Dim subjectText As String
+
+    On Error GoTo ErrH
+    SendTodayPlanMail = False
+
+    toAddr = ResolveRecipient(personKey) ' kod/ad/email -> email
+    If Len(toAddr) = 0 Then Exit Function
+    fullName = ResolveFullName(personKey) ' kod/ad/email -> Ad Soyad
+
+    subjectText = "AAA Ýþ Planý - " & fullName & ", tarih " & Format(Date, "dd.MM.yyyy")
+
+    ' --- HTML gövde ---
+    html = ""
+    html = html & "<p>Sayýn " & fullName & ",</p>"
+    html = html & "<p>Bugün için planlanan görevleriniz aþaðýdadýr. Ýyi çalýþmalar.</p>"
+    html = html & "<table border='1' cellspacing='0' cellpadding='6' "
+    html = html & "style='border-collapse:collapse;font-family:Segoe UI,Arial,sans-serif;font-size:10.5pt;'>"
+    html = html & "<tr style='background:#f2f2f2;'>"
+    html = html & "<th align='right'>No</th>"
+    html = html & "<th align='left'>Toplantý</th>"
+    html = html & "<th align='left'>Görev</th>"
+    html = html & "<th align='left'>Termin</th>"
+    html = html & "<th align='left'>Sorumlu</th>"
+    html = html & "<th align='left'>Durum</th>"
+    html = html & "</tr>"
+
+    For i = 1 To items.Count
+        it = items(i): Set ws = ThisWorkbook.Worksheets(CStr(it(0))): r = CLng(it(1))
+        html = html & "<tr>"
+        html = html & "<td align='right'>" & i & "</td>"
+        html = html & "<td>" & ws.Name & "</td>"
+        html = html & "<td>" & ws.Cells(r, "E").text & "</td>"
+        html = html & "<td>" & Format(ws.Cells(r, "H").value, "dd.MM.yyyy") & "</td>"
+        html = html & "<td>" & ws.Cells(r, "F").text & "</td>"
+        html = html & "<td>" & Format(ws.Cells(r, "J").value, "0%") & "</td>"
+        html = html & "</tr>"
+    Next i
+    html = html & "</table>"
+    html = html & "<p>Dokümana hýzlý eriþim: <a href='" & ONEDRIVE_LINK & "'>buraya týklayýn</a>.</p>"
+    html = html & "<p>Saygýlarýmla</p>"
+
+    ' --- Gönderim ---
+    Set OutApp = CreateObject("Outlook.Application")
+    Set OutMail = OutApp.CreateItem(0)
+    With OutMail
+        Set rec = .recipients.Add(toAddr): rec.Resolve
+        ' Sadece CB CC olacak (talebiniz gereði)
+        With .recipients.Add("ceyhun@isotec.com.tr"): .Type = 2: .Resolve: End With
+        .Subject = subjectText
+        .BodyFormat = 2
+        .htmlBody = html
+        .Save
+        .Send
+    End With
+
+    SendTodayPlanMail = True
+
+CleanExit:
+    On Error Resume Next
+    Set rec = Nothing: Set OutMail = Nothing: Set OutApp = Nothing
+    Exit Function
+ErrH:
+    Resume CleanExit
+End Function
+
+' --- Tüm kiþilere gönder: H=today olan görevlerden benzersiz sorumlularý bul ---
+Public Sub SendTodayPlansForAll()
+    Dim dict As Object, ws As Worksheet, lastRow As Long, r As Long
+    Dim person As String, vJ As Variant
+    Set dict = CreateObject("Scripting.Dictionary")
+
+    For Each ws In ThisWorkbook.Worksheets
+        If IsMeetingSheet(ws) Then
+            lastRow = ws.Cells(ws.Rows.Count, "F").End(xlUp).Row
+            For r = 5 To lastRow
+                If IsDueToday(ws.Cells(r, "H").value) Then
+                    vJ = ws.Cells(r, "J").Value2
+                    If IsNumeric(vJ) And vJ < 0.99 Then
+                        person = Trim$(ws.Cells(r, "F").text)
+                        If Len(person) > 0 Then dict(person) = True
+                    End If
+                End If
+            Next r
+        End If
+    Next ws
+
+    ' Kiþi kiþi gönder
+    Dim k As Variant, items As Collection
+    For Each k In dict.keys
+        Set items = CollectTodayTasksForPerson(CStr(k))
+        If items.Count > 0 Then Call SendTodayPlanMail(CStr(k), items)
+    Next k
+End Sub
+
+/* ===== END FILE: ./Mod_TodayPlan.bas ===== */
+
+/* ===== FILE: ./Mod_Types.bas ===== */
+
+Attribute VB_Name = "Mod_Types"
+
+'== Mod_Types.bas ==
+Option Explicit
+
+Public Type TStats
+    total As Long
+    Open As Long
+    Overdue As Long
+    DueToday As Long
+    
+End Type
+
+/* ===== END FILE: ./Mod_Types.bas ===== */
+
+/* ===== FILE: ./Module_Mail.bas ===== */
+
+Attribute VB_Name = "Module_Mail"
+
+'== Module_Mail.bas ==
+Option Explicit
+
+' === Yardýmcý: Data hücrelerinden çýkan e-postayý temiz ve tek adres haline getir ===
+Private Function CleanAddress(ByVal s As String) As String
+    Dim startB As Long, endB As Long
+
+    s = Trim$(s)
+    s = Replace(s, vbCr, "")
+    s = Replace(s, vbLf, "")
+    s = Replace(s, vbTab, "")
+
+    If InStr(1, s, "mailto:", vbTextCompare) > 0 Then
+        s = Replace$(s, "mailto:", "", , , vbTextCompare)
+    End If
+
+    startB = InStr(s, "["): endB = InStr(s, "]")
+    If startB > 0 And endB > startB Then
+        s = Mid$(s, startB + 1, endB - startB - 1)
+    End If
+
+    If InStr(s, "(") > 0 Then s = left$(s, InStr(s, "(") - 1)
+
+    s = Replace$(s, "<", "")
+    s = Replace$(s, ">", "")
+
+    If InStr(s, " ") > 0 Then s = left$(s, InStr(s, " ") - 1)
+
+    CleanAddress = Trim$(s)
+End Function
+
+' === Basit e-posta doðrulamasý: "x@y.z" desenini ve illegal karakterleri kontrol et ===
+Private Function IsValidEmail(ByVal addr As String) As Boolean
+    Dim atPos As Long, dotPos As Long
+
+    addr = Trim$(addr)
+    If Len(addr) = 0 Then Exit Function
+    If InStr(addr, " ") > 0 Then Exit Function
+    If InStr(addr, vbCr) > 0 Or InStr(addr, vbLf) > 0 Or InStr(addr, vbTab) > 0 Then Exit Function
+
+    atPos = InStr(addr, "@"): If atPos = 0 Then Exit Function
+    dotPos = InStr(atPos + 1, addr, "."): If dotPos = 0 Then Exit Function
+    If left$(addr, 1) = "." Or right$(addr, 1) = "." Then Exit Function
+
+    IsValidEmail = True
+End Function
+
+' === F sütunundaki Sorumlu girdisini e-postaya çevir: kod / ad / direkt e-posta desteklenir ===
+Public Function ResolveRecipient(ByVal responsibleInput As String) As String
+    Dim ws As Worksheet, f As Range, s As String, candidate As String
+
+    s = Trim$(responsibleInput)
+    If Len(s) = 0 Then Exit Function
+
+    If InStr(1, s, "@") > 0 Then
+        candidate = CleanAddress(s)
+        If IsValidEmail(candidate) Then ResolveRecipient = candidate: Exit Function
+    End If
+
+    Set ws = ThisWorkbook.Worksheets("Data")
+
+    Set f = ws.Columns("A").Find(What:=s, LookIn:=xlValues, LookAt:=xlWhole, MatchCase:=False)
+    If Not f Is Nothing Then
+        candidate = CleanAddress(CStr(f.Offset(0, 3).value))  ' D sütunu: Mail
+        If IsValidEmail(candidate) Then ResolveRecipient = candidate: Exit Function
+    End If
+
+    Set f = ws.Columns("B").Find(What:=s, LookIn:=xlValues, LookAt:=xlPart, MatchCase:=False)
+    If Not f Is Nothing Then
+        candidate = CleanAddress(CStr(f.Offset(0, 2).value))  ' D sütunu: Mail
+        If IsValidEmail(candidate) Then ResolveRecipient = candidate: Exit Function
+    End If
+
+    ResolveRecipient = ""
+End Function
+
+' === GÖNDERÝM: Recipients.Add ile güvenli ekleme; TRUE dönerse gerçekten gönderilmiþtir ===
+Public Function SendTaskMail(ByVal ws As Worksheet, ByVal r As Long, Optional ByVal oneDriveLink As String = "") As Boolean
+    Dim OutApp As Object, OutMail As Object, recp As Object
+    Dim subjectText As String, toAddr As String
+    Dim html As String, ccSplit As Variant, i As Long
+
+    On Error GoTo ErrHandler
+    SendTaskMail = False
+
+    If Len(oneDriveLink) = 0 Then oneDriveLink = ONEDRIVE_LINK
+
+    toAddr = ResolveRecipient(CStr(ws.Cells(r, "F").value))
+    If Len(toAddr) = 0 Then
+        MsgBox "Mail gönderilemedi: F hücresindeki deðer için geçerli e-posta bulunamadý.", vbExclamation, "Alýcý yok"
+        Exit Function
+    End If
+
+    subjectText = "Yeni Görev Eklendi / " & ws.Name & " Toplantýsý"
+    
+   
+    ' --- TABLOYU GÜNCELLE ---
+    html = ""
+    html = html & "<p>Sayýn Yetkili,</p>"
+    html = html & "<p>Tarafýnýza görev atanmýþtýr, lütfen iþ planýnýza alýnýz.</p>"
+    html = html & "<table border='1' cellspacing='0' cellpadding='6' style='border-collapse:collapse;font-family:Segoe UI,Arial,sans-serif;font-size:10.5pt;'>"
+    html = html & "<tr style='background:#f2f2f2;'>"
+    html = html & "<th align='left'>Konu/Madde (D)</th>"
+    html = html & "<th align='left'>Görev/Aksiyon (E)</th>"
+    html = html & "<th align='left'>Planlanan Tarih (H)</th>"
+    html = html & "<th align='left'>Sorumlu (F)</th>"
+    html = html & "</tr><tr>"
+    html = html & "<td>" & ws.Cells(r, "D").text & "</td>"
+    html = html & "<td>" & ws.Cells(r, "E").text & "</td>"
+    html = html & "<td>" & ws.Cells(r, "H").text & "</td>"
+    html = html & "<td>" & ws.Cells(r, "F").text & "</td>"
+    html = html & "</tr></table>"
+    html = html & "<p>Dokümana hýzlý eriþim: <a href='" & oneDriveLink & "'>buraya týklayýn</a>.</p>"
+    html = html & "<p>Saygýlarýmýzla</p>"
+    
+
+    Set OutApp = CreateObject("Outlook.Application")
+    Set OutMail = OutApp.CreateItem(0)
+
+    With OutMail
+        ' Alýcý
+        Set recp = .recipients.Add(toAddr)
+        recp.Resolve
+
+        ' CC'ler
+        ccSplit = Split(CC_LIST, ";")
+        For i = LBound(ccSplit) To UBound(ccSplit)
+            If Len(Trim$(ccSplit(i))) > 0 Then
+                Set recp = .recipients.Add(Trim$(ccSplit(i)))
+                recp.Type = 2   ' olCC
+                recp.Resolve
+            End If
+        Next i
+
+        .Subject = subjectText
+        .BodyFormat = 2        ' olFormatHTML (late binding)
+        .htmlBody = html
+
+        '.Display              ' TEST için açýn
+        .Save
+        .Send                  ' canlý gönderim
+    End With
+
+    SendTaskMail = True
+
+CleanUp:
+    On Error Resume Next
+    Set recp = Nothing
+    Set OutMail = Nothing
+    Set OutApp = Nothing
+    Exit Function
+
+ErrHandler:
+    MsgBox "Mail gönderimi sýrasýnda hata: " & Err.Description, vbCritical, "Outlook hatasý"
+    Resume CleanUp
+End Function
+
+' === Tamamlanan görev bildirimi: CB & HAO'ya gönder ===
+'== Module_Mail.bas -- SendCompletionMail güncel ==
+Public Function SendCompletionMail(ByVal ws As Worksheet, ByVal r As Long, Optional ByVal oneDriveLink As String = "") As Boolean
+    Dim OutApp As Object, OutMail As Object
+    Dim subjectText As String, html As String, kanitText As String
+    Dim toAddr As String
+
+    On Error GoTo ErrHandler
+    SendCompletionMail = False
+    If Len(oneDriveLink) = 0 Then oneDriveLink = ONEDRIVE_LINK
+
+    toAddr = ResolveRecipient(CStr(ws.Cells(r, "F").value)) ' F=Sorumlu -> e-posta
+    If Len(toAddr) = 0 Then Exit Function
+
+    subjectText = "Görev Tamamlandý / " & ws.Name & " Toplantýsý"
+    kanitText = Trim$(ws.Cells(r, "K").text): If Len(kanitText) = 0 Then kanitText = "—"
+
+    html = ""
+    html = html & "<p>Sayýn Yetkili,</p>"
+    html = html & "<p>Aþaðýdaki görev <b>tamamlanmýþtýr</b>:</p>"
+    html = html & "<table border='1' cellspacing='0' cellpadding='6' style='border-collapse:collapse;font-family:Segoe UI,Arial,sans-serif;font-size:10.5pt;'>"
+    html = html & "<tr style='background:#f2f2f2;'><th align='left'>Konu/Madde (D)</th><th align='left'>Görev/Aksiyon (E)</th><th align='left'>Planlanan (H)</th><th align='left'>Sorumlu (F)</th><th align='left'>Bitiþ (I)</th></tr>"
+    html = html & "<tr><td>" & ws.Cells(r, "D").text & "</td><td>" & ws.Cells(r, "E").text & "</td><td>" & ws.Cells(r, "H").text & "</td><td>" & ws.Cells(r, "F").text & "</td><td>" & ws.Cells(r, "I").text & "</td></tr>"
+    html = html & "</table>"
+    html = html & "<p><b>Kanýt</b>: " & kanitText & "</p>"
+    html = html & "<p>Dokümana hýzlý eriþim: <a href='" & oneDriveLink & "'>buraya týklayýn</a>.</p>"
+    html = html & "<p>Bilginize sunarým.</p>"
+
+    Set OutApp = CreateObject("Outlook.Application")
+    Set OutMail = OutApp.CreateItem(0)
+    With OutMail
+        .recipients.Add toAddr ' TO: Sorumlu
+        ' CC: CB ve HAO
+        With .recipients.Add("ceyhun@isotec.com.tr"): .Type = 2: .Resolve: End With
+        With .recipients.Add("halisahmet.orhan@isotec.com.tr"): .Type = 2: .Resolve: End With
+        .Subject = subjectText
+        .BodyFormat = 2
+        .htmlBody = html
+        .Save
+        .Send
+    End With
+    SendCompletionMail = True
+
+CleanExit:
+    On Error Resume Next
+    Set OutMail = Nothing
+    Set OutApp = Nothing
+    Exit Function
+    
+ErrHandler:
+    MsgBox "Tamamlanan görev mailinde hata: " & Err.Description, vbCritical, "Outlook hatasý"
+    Resume CleanExit
+    
+End Function
+
+' -- Rapor maillerinde CC kuralýný uygula --
+Public Sub AddCC_ForReport(ByVal mailItem As Object, ByVal sheetName As String)
+    Dim addr As String
+
+    ' CB ve HAO her zaman CC
+    addr = ResolveRecipient("CB"): If Len(addr) = 0 Then addr = "ceyhun@isotec.com.tr"
+    With mailItem.recipients.Add(addr): .Type = 2: .Resolve: End With
+
+    addr = ResolveRecipient("HAO"): If Len(addr) = 0 Then addr = "halisahmet.orhan@isotec.com.tr"
+    With mailItem.recipients.Add(addr): .Type = 2: .Resolve: End With
+    
+    ' Koordinasyon sayfasý ise EÖ ve ZÖ de CC
+    If LCase$(sheetName) = LCase$("Koordinasyon") Or LCase$(sheetName) = LCase$("Koordinasyon") Then
+        addr = ResolveRecipient("EÖ"): If Len(addr) = 0 Then addr = "erkan@isotec.com.tr"
+        With mailItem.recipients.Add(addr): .Type = 2: .Resolve: End With
+
+        addr = ResolveRecipient("ZÖ"): If Len(addr) = 0 Then addr = "zahide@isotec.com.tr"
+        With mailItem.recipients.Add(addr): .Type = 2: .Resolve: End With
+    End If
+
+    ' Sipariþ sayfasý ise EÖ, ZÖ, EG ve HB de CC
+    If LCase$(sheetName) = LCase$("Sipariþ") Or LCase$(sheetName) = LCase$("Siparis") Then
+        addr = ResolveRecipient("EÖ"): If Len(addr) = 0 Then addr = "erkan@isotec.com.tr"
+        With mailItem.recipients.Add(addr): .Type = 2: .Resolve: End With
+
+        addr = ResolveRecipient("ZÖ"): If Len(addr) = 0 Then addr = "zahide@isotec.com.tr"
+        With mailItem.recipients.Add(addr): .Type = 2: .Resolve: End With
+        
+        addr = ResolveRecipient("EG"): If Len(addr) = 0 Then addr = "eray.guzel@isotec.com.tr"
+        With mailItem.recipients.Add(addr): .Type = 2: .Resolve: End With
+
+        addr = ResolveRecipient("HB"): If Len(addr) = 0 Then addr = "hakan.bildirici@isotec.com.tr"
+        With mailItem.recipients.Add(addr): .Type = 2: .Resolve: End With
+    End If
+End Sub
+
+
+/* ===== END FILE: ./Module_Mail.bas ===== */
+
+/* ===== FILE: ./modAI.bas ===== */
+
+Attribute VB_Name = "modAI"
+
+'=== Cloudflare Workers AI (Run Model) ===
+Option Explicit
+Private Const CF_MODEL As String = "@cf/meta/llama-3-8b-instruct"  ' sizin curl örneðinizle ayný
+
+Public Function AskAI_Cloudflare(promptText As String) As String
+    On Error GoTo ErrHandler
+
+    Dim token As String: token = GetCFToken()
+    If Len(token) = 0 Then
+        AskAI_Cloudflare = "Token boþ: CF_API_TOKEN okunamadý."
+        Exit Function
+    End If
+
+    Dim accountId As String: accountId = GetCFAccountId()
+    If Len(accountId) <> 32 Then
+        AskAI_Cloudflare = "Geçersiz CF_ACCOUNT_ID: " & accountId
+        Exit Function
+    End If
+
+    Dim url As String
+    url = "https://api.cloudflare.com/client/v4/accounts/" & accountId & "/ai/run/" & CF_MODEL
+
+    ' ? Sizin curl örneðiniz gibi "messages" ile gönderelim:
+    Dim payload As String
+    payload = "{""messages"":[{""role"":""system"",""content"":""Sen bir aksiyon takip asistanýsýn. Türkçe ve kýsa cevap ver.""}," & _
+              "{""role"":""user"",""content"":""" & EscapeJson(promptText) & """}]}"
+
+    Dim status As Long
+    Dim resp As String
+    resp = HttpPostJson_Bearer(url, token, payload, status)
+
+    ' Status 200 deðilse bile, JSON'da success:true ise baþarýlý kabul et
+    If status <> 200 Then
+        If InStr(1, resp, """success"":true", vbTextCompare) > 0 Then
+            AskAI_Cloudflare = ParseCloudflareResult(resp)
+            Exit Function
+        End If
+
+        AskAI_Cloudflare = "Cloudflare HTTP " & status & vbCrLf & resp
+        Exit Function
+    End If
+
+    AskAI_Cloudflare = ParseCloudflareResult(resp)
+    Exit Function
+    
+    ' Parse sonucu boþsa ham yanýtý göster (debug için)
+    If Len(Trim$(AskAI_Cloudflare)) = 0 Then
+        AskAI_Cloudflare = "AI yanýtý boþ döndü. Ham cevap:" & vbCrLf & left$(resp, 1500)
+    End If
+
+ErrHandler:
+       AskAI_Cloudflare = "VBA Error: " & Err.Number & " - " & Err.Description
+
+End Function
+
+Private Function GetCFAccountId() As String
+    On Error Resume Next
+    
+    Dim s As String: s = ""
+    
+    ' 1) Önce named range’den dene
+    s = CStr(ThisWorkbook.Names("CF_ACCOUNT_ID").RefersToRange.value)
+    
+    ' 2) Yoksa Config!B2’den oku
+    If Len(Trim$(s)) = 0 Then
+        s = CStr(ThisWorkbook.Worksheets("Config").Range("B2").value)
+    End If
+    
+    ' Temizlik
+    s = Replace(s, vbCr, "")
+    s = Replace(s, vbLf, "")
+    s = Replace(s, "<", "")
+    s = Replace(s, ">", "")
+    s = Trim$(s)
+    
+    GetCFAccountId = s
+End Function
+
+Private Function IsValidAccountId(ByVal s As String) As Boolean
+    Dim i As Long, ch As String
+    If Len(s) <> 32 Then Exit Function
+    For i = 1 To Len(s)
+        ch = Mid$(s, i, 1)
+        If InStr("0123456789abcdefABCDEF", ch) = 0 Then Exit Function
+    Next i
+       IsValidAccountId = True
+End Function
+
+
+Private Function GetCFToken() As String
+    On Error Resume Next
+    Dim t As String
+    t = ThisWorkbook.Names("CF_API_TOKEN").RefersToRange.value
+
+    ' boþluk ve satýr sonlarýný temizle
+    t = Replace(t, vbCr, "")
+    t = Replace(t, vbLf, "")
+    t = Trim$(t)
+
+    GetCFToken = t
+End Function
+
+Private Function HttpPostJson_Bearer(url As String, token As String, jsonBody As String, ByRef statusCode As Long) As String
+    Dim http As Object: Set http = CreateObject("WinHttp.WinHttpRequest.5.1")
+    http.Open "POST", url, False
+    http.SetRequestHeader "Content-Type", "application/json; charset=utf-8"
+    http.SetRequestHeader "Authorization", "Bearer " & token
+    http.SetRequestHeader "Accept", "application/json"
+    http.Send jsonBody
+
+    ' Yanýtýn gerçekten geldiðinden emin ol
+    http.WaitForResponse 60
+
+    On Error Resume Next
+    statusCode = CLng(http.status)
+    On Error GoTo 0
+
+    ' ? ResponseText yerine ResponseBody (byte) alýp UTF-8 decode et
+    HttpPostJson_Bearer = Utf8BytesToString(http.ResponseBody)
+End Function
+
+Private Function Utf8BytesToString(ByVal bytes As Variant) As String
+    ' bytes: WinHTTP ResponseBody -> Byte()
+    Dim stm As Object
+    Set stm = CreateObject("ADODB.Stream")
+
+    stm.Type = 1 ' adTypeBinary
+    stm.Open
+    stm.Write bytes
+    stm.Position = 0
+
+    stm.Type = 2 ' adTypeText
+    stm.Charset = "utf-8"
+    Utf8BytesToString = stm.ReadText
+
+    stm.Close
+
+End Function
+
+
+Private Function ParseCloudflareResult(respJson As String) As String
+    Dim p As Long, q As Long
+    p = InStr(1, respJson, """response"":")
+    If p = 0 Then
+        ParseCloudflareResult = "Cevap okunamadý (response alaný yok): " & left$(respJson, 500)
+        Exit Function
+    End If
+
+    p = InStr(p + 11, respJson, """") + 1
+    q = InStr(p, respJson, """")
+
+    ParseCloudflareResult = Replace(Mid$(respJson, p, q - p), "\n", vbCrLf)
+End Function
+
+Private Function EscapeJson(ByVal text As String) As String
+    text = Replace(text, "\", "\\")
+    text = Replace(text, """", "\""")
+    text = Replace(text, vbCrLf, "\n")
+    text = Replace(text, vbCr, "\n")
+    text = Replace(text, vbLf, "\n")
+    EscapeJson = text
+End Function
+
+
+
+/* ===== END FILE: ./modAI.bas ===== */
+
+/* ===== FILE: ./modContex.bas ===== */
+
+Attribute VB_Name = "modContex"
+
+'=== Modül: modContext ===
+Option Explicit
+
+Public Function BuildContextSummary() As String
+    Dim sb As String
+    sb = "Veri Özeti (bugün: " & Format(Date, "dd.MM.yyyy") & "):" & vbCrLf
+    sb = sb & ContextForSheet("Koordinasyon") & vbCrLf
+    sb = sb & ContextForSheet("Sipariþ") & vbCrLf
+    sb = sb & ContextForSheet("Þikayet") & vbCrLf
+    sb = sb & ContextForSheet("Atýl_Stok") & vbCrLf
+    sb = sb & ContextForSheet("Kalite") & vbCrLf
+    BuildContextSummary = sb
+End Function
+
+Public Function BuildContextSummaryDetailed() As String
+    Dim sb As String
+    sb = "Bugün: " & Format(Date, "dd.MM.yyyy") & vbCrLf & _
+         "Aþaðýdaki özet; sayfa bazýnda KPI + kritik maddeler içerir." & vbCrLf & vbCrLf
+    
+    sb = sb & SummaryWithTop("Koordinasyon") & vbCrLf
+    sb = sb & SummaryWithTop("Sipariþ") & vbCrLf
+    sb = sb & SummaryWithTop("Þikayet") & vbCrLf
+    sb = sb & SummaryWithTop("Atýl_Stok") & vbCrLf
+    sb = sb & SummaryWithTop("Kalite") & vbCrLf
+    
+    BuildContextSummaryDetailed = sb
+End Function
+
+Private Function SummaryWithTop(sheetName As String) As String
+    On Error GoTo Fail
+    
+    Dim ws As Worksheet: Set ws = ThisWorkbook.Worksheets(sheetName)
+    Dim lastRow As Long: lastRow = ws.Cells(ws.Rows.Count, "A").End(xlUp).Row
+    
+    Dim firstDataRow As Long: firstDataRow = FindFirstDataRow(ws, lastRow)
+    
+    Dim totalCnt As Long, openCnt As Long, overdueCnt As Long, todayCnt As Long
+    Dim i As Long
+    Dim pDate As Variant, done As Variant
+    
+    ' Top listeler
+    Dim topOverdue As String: topOverdue = ""
+    Dim topToday As String: topToday = ""
+    
+    For i = firstDataRow To lastRow
+        If IsNumeric(ws.Cells(i, 1).value) And Len(Trim$(ws.Cells(i, 1).value)) > 0 Then
+            totalCnt = totalCnt + 1
+            
+            pDate = ws.Cells(i, 7).value  ' Planlanan Tarih
+            done = ws.Cells(i, 9).value   ' % Tamamlanma
+            
+            If Val(done) < 1 Then
+                openCnt = openCnt + 1
+                
+                If IsDate(pDate) Then
+                    If CDate(pDate) < Date Then
+                        overdueCnt = overdueCnt + 1
+                        If CountLines(topOverdue) < 5 Then
+                            topOverdue = topOverdue & "- " & ItemLine(ws, i) & vbCrLf
+                        End If
+                    ElseIf CDate(pDate) = Date Then
+                        todayCnt = todayCnt + 1
+                        If CountLines(topToday) < 5 Then
+                            topToday = topToday & "- " & ItemLine(ws, i) & vbCrLf
+                        End If
+                    End If
+                End If
+            End If
+        End If
+    Next i
+    
+    Dim s As String
+    s = sheetName & " | Toplam:" & totalCnt & " Açýk:" & openCnt & _
+        " Gecikmiþ:" & overdueCnt & " Bugün:" & todayCnt & vbCrLf
+    
+    If Len(topOverdue) > 0 Then s = s & "Gecikmiþ Ýlk 5:" & vbCrLf & topOverdue
+    If Len(topToday) > 0 Then s = s & "Bugün Planlý Ýlk 5:" & vbCrLf & topToday
+    
+    SummaryWithTop = s
+    Exit Function
+
+Fail:
+    SummaryWithTop = sheetName & " | Özet alýnamadý: " & Err.Description
+End Function
+
+Private Function FindFirstDataRow(ws As Worksheet, lastRow As Long) As Long
+    Dim i As Long
+    FindFirstDataRow = 1
+    For i = 1 To Application.Min(25, lastRow)
+        If UCase$(Trim$(ws.Cells(i, 1).value)) Like "*SIRA*" Then
+            FindFirstDataRow = i + 1
+            Exit Function
+        End If
+    Next i
+End Function
+
+Private Function ItemLine(ws As Worksheet, r As Long) As String
+    ' Kolonlar: Konu/Madde (C), Aksiyon (D), Sorumlu (E), Planlanan (G), % (I)
+    ItemLine = _
+        "No:" & ws.Cells(r, 1).value & _
+        " | Konu:" & left$(CStr(ws.Cells(r, 3).value), 60) & _
+        " | Aksiyon:" & left$(CStr(ws.Cells(r, 4).value), 80) & _
+        " | Sorumlu:" & CStr(ws.Cells(r, 5).value) & _
+        " | Plan:" & DateText(ws.Cells(r, 7).value) & _
+        " | %:" & CStr(ws.Cells(r, 9).value)
+End Function
+
+Private Function DateText(v As Variant) As String
+    If IsDate(v) Then
+        DateText = Format(CDate(v), "dd.MM.yyyy")
+    Else
+        DateText = CStr(v)
+    End If
+End Function
+
+Private Function CountLines(s As String) As Long
+    If Len(Trim$(s)) = 0 Then
+        CountLines = 0
+    Else
+        CountLines = UBound(Split(Trim$(s), vbCrLf)) + 1
+    End If
+End Function
+
+Private Function ContextForSheet(sheetName As String) As String
+    On Error GoTo SafeExit
+    Dim ws As Worksheet: Set ws = ThisWorkbook.Worksheets(sheetName)
+    Dim lastRow As Long: lastRow = ws.Cells(ws.Rows.Count, "A").End(xlUp).Row
+    
+    Dim i As Long, openCnt As Long, overdueCnt As Long, totalCnt As Long, todayCnt As Long
+    Dim pDate As Variant, done As Variant
+    
+    ' Baþlýk satýrlarýný atlamak için basit heuristik (ilk veri satýrýný arar)
+    Dim firstDataRow As Long: firstDataRow = 1
+    For i = 1 To Application.Min(20, lastRow)
+        If UCase(ws.Cells(i, 1).value) Like "*SIRA*" Then
+            firstDataRow = i + 1
+            Exit For
+        End If
+    Next i
+    
+    For i = firstDataRow To lastRow
+        If Len(Trim(ws.Cells(i, 1).value)) > 0 And IsNumeric(ws.Cells(i, 1).value) Then
+            totalCnt = totalCnt + 1
+            pDate = ws.Cells(i, 7).value         ' Planlanan Tarih sütunu
+            done = ws.Cells(i, 9).value          ' % Tamamlanma sütunu
+            If Val(done) < 1 Then
+                openCnt = openCnt + 1
+                If IsDate(pDate) Then
+                    If CDate(pDate) < Date Then overdueCnt = overdueCnt + 1
+                    If CDate(pDate) = Date Then todayCnt = todayCnt + 1
+                End If
+            End If
+        End If
+    Next i
+    
+    ContextForSheet = sheetName & " — Toplam:" & totalCnt & _
+                      ", Açýk:" & openCnt & ", Gecikmiþ:" & overdueCnt & _
+                      ", Bugün Planlý:" & todayCnt
+SafeExit:
+
+End Function
+
+/* ===== END FILE: ./modContex.bas ===== */
+
+/* ===== FILE: ./modFlow.bas ===== */
+
+Attribute VB_Name = "modFlow"
+
+'=== Module: modFlow ===
+
+Option Explicit
+
+Public Sub RepairAgendaNamedRanges()
+    Dim ws As Worksheet
+    Set ws = ThisWorkbook.Worksheets("Gündem")
+
+    Application.ScreenUpdating = False
+
+    ' 1) Eski isimleri sil (varsa)
+    On Error Resume Next
+    ThisWorkbook.Names("rngAI_Question").Delete
+    ThisWorkbook.Names("rngAI_Answer").Delete
+    On Error GoTo 0
+
+    ' 2) UI'daki hücreleri garanti merge yap
+    ws.Range("B4:H5").UnMerge
+    ws.Range("B4:H5").Merge
+    ws.Range("B4:H5").WrapText = True
+
+    ws.Range("B9:H30").UnMerge
+    ws.Range("B9:H30").Merge
+    ws.Range("B9:H30").WrapText = True
+    ws.Range("B9:H30").VerticalAlignment = xlVAlignTop
+
+    ' 3) Ýsimleri yeniden oluþtur (workbook-scope)
+    ' Ýsimleri merge alanýn sol-üst hücresine baðlamak en saðlýklýsýdýr.
+    ThisWorkbook.Names.Add Name:="rngAI_Question", RefersTo:=ws.Range("B4")
+    ThisWorkbook.Names.Add Name:="rngAI_Answer", RefersTo:=ws.Range("B9")
+
+    Application.ScreenUpdating = True
+
+    MsgBox "rngAI_Question ve rngAI_Answer yeniden oluþturuldu." & vbCrLf & _
+           "Þimdi Gündem'de Soruyu Çalýþtýr'ý tekrar deneyin.", vbInformation
+End Sub
+
+
+Sub AskAI_Run()
+    Dim ws As Worksheet, wsc As Worksheet
+    Dim lastStep As String
+    
+    On Error GoTo ErrHandler
+    
+    Set ws = ThisWorkbook.Worksheets("Gündem")
+    Set wsc = ThisWorkbook.Worksheets("Config")
+    
+    lastStep = "1) Baþladý"
+    wsc.Range("D9").value = lastStep
+    
+    ' 1) Soru oku
+    lastStep = "2) Soru okunuyor (rngAI_Question)"
+    wsc.Range("D9").value = lastStep
+    
+    Dim q As String
+    q = CStr(ws.Range("rngAI_Question").MergeArea.Cells(1, 1).value)
+    
+    If Len(Trim$(q)) = 0 Then
+        MsgBox "Lütfen bir soru yazýn.", vbInformation
+        Exit Sub
+    End If
+    
+    ' 2) Baðlam üret
+    lastStep = "3) BuildContextSummary çalýþýyor"
+    wsc.Range("D9").value = lastStep
+    
+    Dim ctx As String
+    ctx = BuildContextSummaryDetailed()
+    
+    ' 3) Prompt hazýrla
+    lastStep = "4) BuildSmartPrompt çalýþýyor"
+    wsc.Range("D9").value = lastStep
+    
+    Dim promptAll As String
+    promptAll = BuildSmartPrompt(q, ctx)
+    
+    ' 4) AI çaðrýsý
+    lastStep = "5) AskAI_Cloudflare çaðrýsý"
+    wsc.Range("D9").value = lastStep
+    
+    Application.StatusBar = "AI yanýt üretiyor..."
+    Dim ans As String
+    ans = AskAI_Cloudflare(promptAll)
+    Application.StatusBar = False
+    
+    ' 5) Cevabý yaz
+    lastStep = "6) Cevap yazýlýyor (rngAI_Answer)"
+    wsc.Range("D9").value = lastStep
+    
+    SafeWriteMerged ws.Range("rngAI_Answer"), ans
+    
+    lastStep = "7) Log yazýlýyor"
+    wsc.Range("D9").value = lastStep
+    
+    LogToSysLog Environ$("username"), "Gündem", "AI_Chat_CF"
+    
+    lastStep = "8) Bitti"
+    wsc.Range("D9").value = lastStep
+    
+    Exit Sub
+    
+    
+    If Len(Trim$(ans)) = 0 Then ans = "(Boþ yanýt alýndý) Lütfen tekrar deneyin."
+
+
+ErrHandler:
+    Application.StatusBar = False
+    
+    ' D9: son adým, D10: hata metni
+    On Error Resume Next
+    wsc.Range("D10").value = "HATA: " & Err.Number & " - " & Err.Description
+    On Error GoTo 0
+    
+    MsgBox "AskAI_Run hata: " & Err.Number & " - " & Err.Description & vbCrLf & _
+           "Son adým (Config!D9): " & wsc.Range("D9").value, vbExclamation
+End Sub
+
+Private Sub SafeWriteMerged(ByVal rng As Range, ByVal txt As String)
+    If rng.MergeCells Then
+        rng.MergeArea.Cells(1, 1).value = vbNullString
+        rng.MergeArea.Cells(1, 1).value = txt
+        rng.MergeArea.WrapText = True
+    Else
+        rng.value = txt
+        rng.WrapText = True
+    End If
+End Sub
+
+''API testi
+Public Sub Test_Cloudflare()
+    Dim ans As String
+    ans = AskAI_Cloudflare("Sadece OK yaz.")
+    MsgBox ans, vbInformation, "Cloudflare Test"
+End Sub
+
+Public Sub Check_CF_Token_Length()
+    Dim t As String
+    t = GetCFTokenSafe()
+    
+    If Len(t) = 0 Then
+        MsgBox "CF_API_TOKEN okunamadý. Name Manager'da 'Workbook scope' ile tanýmlý mý kontrol edin." & vbCrLf & _
+               "Öneri: Fix_CF_Names makrosunu çalýþtýrýn.", vbExclamation
+        Exit Sub
+    End If
+    
+    MsgBox "Token karakter sayýsý: " & Len(t), vbInformation
+End Sub
+
+Private Function GetCFTokenSafe() As String
+    On Error Resume Next
+    
+    Dim t As String: t = ""
+    
+    ' 1) Workbook-level name
+    t = CStr(ThisWorkbook.Names("CF_API_TOKEN").RefersToRange.value)
+    
+    ' 2) Hâlâ boþsa Config!B1 fallback
+    If Len(Trim$(t)) = 0 Then
+        t = CStr(ThisWorkbook.Worksheets("Config").Range("B1").value)
+    End If
+    
+    ' Temizlik
+    t = Replace(t, vbCr, "")
+    t = Replace(t, vbLf, "")
+    t = Trim$(t)
+    
+    GetCFTokenSafe = t
+End Function
+
+
+Public Sub Fix_CF_Names()
+    Dim ws As Worksheet
+    Set ws = ThisWorkbook.Worksheets("Config")
+    
+    ' Token hücrenizi burada net belirtin:
+    Dim tokenCell As Range
+    Set tokenCell = ws.Range("B1")
+    
+    On Error Resume Next
+    ' Varsa silip yeniden ekler (scope/baðlantý sorunlarýný temizler)
+    ThisWorkbook.Names("CF_API_TOKEN").Delete
+    On Error GoTo 0
+    
+    ThisWorkbook.Names.Add Name:="CF_API_TOKEN", RefersTo:=tokenCell
+    
+    MsgBox "CF_API_TOKEN isimli aralýk oluþturuldu: " & tokenCell.Address(External:=True), vbInformation
+End Sub
+
+
+Public Sub Test_Cloudflare_Diag_ToCell()
+    Dim ans As String
+    ans = AskAI_Cloudflare("Sadece OK yaz.")
+    
+    ' Config sayfasýna yaz
+    Dim ws As Worksheet
+    Set ws = ThisWorkbook.Worksheets("Config")
+    
+    ws.Range("A5").value = "Cloudflare Test Sonucu"
+    ws.Range("B5").value = ans
+    ws.Range("B5").WrapText = True
+    ws.Rows(5).RowHeight = 120
+    
+    MsgBox "Test sonucu Config!B5 hücresine yazýldý. Lütfen oradaki ilk satýrdaki HTTP kodunu gönderin.", vbInformation
+End Sub
+
+
+Public Sub Fix_CF_AccountId_Name()
+    Dim ws As Worksheet
+    Set ws = ThisWorkbook.Worksheets("Config")
+    
+    On Error Resume Next
+    ThisWorkbook.Names("CF_ACCOUNT_ID").Delete
+    On Error GoTo 0
+    
+    ThisWorkbook.Names.Add Name:="CF_ACCOUNT_ID", RefersTo:=ws.Range("B2")
+    MsgBox "CF_ACCOUNT_ID isimli aralýk oluþturuldu: " & ws.Range("B2").Address(External:=True), vbInformation
+End Sub
+
+
+Public Sub Test_Context()
+    Dim ctx As String
+    ctx = BuildContextSummary()
+    ThisWorkbook.Worksheets("Config").Range("B6").value = ctx
+    MsgBox "Baðlam Config!B6'ya yazýldý. Boþ mu kontrol edin.", vbInformation
+End Sub
+
+Private Function GetMergedText(rng As Range) As String
+    If rng.MergeCells Then
+        GetMergedText = CStr(rng.MergeArea.Cells(1, 1).value)
+    Else
+        GetMergedText = CStr(rng.value)
+    End If
+End Function
+
+Private Sub SetMergedText(rng As Range, txt As String)
+    If rng.MergeCells Then
+        rng.MergeArea.ClearContents
+        rng.MergeArea.Cells(1, 1).value = txt
+        rng.MergeArea.WrapText = True
+    Else
+        rng.ClearContents
+        rng.value = txt
+        rng.WrapText = True
+    End If
+End Sub
+
+
+/* ===== END FILE: ./modFlow.bas ===== */
+
+/* ===== FILE: ./modLog.bas ===== */
+
+Attribute VB_Name = "modLog"
+
+'=== Module: modLog ===
+
+Option Explicit
+
+Public Sub LogToSysLog(senderEmail As String, sheetName As String, note As String)
+    On Error Resume Next
+    Dim ws As Worksheet: Set ws = ThisWorkbook.Worksheets("SysLog")
+    Dim r As Long: r = ws.Cells(ws.Rows.Count, "A").End(xlUp).Row + 1
+
+    ws.Cells(r, 1).value = Date
+    ws.Cells(r, 2).value = senderEmail
+    ws.Cells(r, 3).value = sheetName
+    ws.Cells(r, 4).value = note
+End Sub
+
+
+/* ===== END FILE: ./modLog.bas ===== */
+
+/* ===== FILE: ./modMail.bas ===== */
+
+Attribute VB_Name = "modMail"
+
+'=== Modül: modMail ===
+Option Explicit
+
+Sub AskAI_SendMail()
+    Dim ans As String: ans = Range("rngAI_Answer").value
+    If Len(Trim(ans)) = 0 Then
+        MsgBox "Gönderilecek bir AI cevabý yok.", vbExclamation: Exit Sub
+    End If
+    
+    Dim toAddr As String
+    toAddr = InputBox("TO e-posta adresi (ör: gokhan.baskoy@isotec.com.tr):", "Mail Gönder")
+    If Len(Trim(toAddr)) = 0 Then Exit Sub
+    
+    Dim ccAddr As String: ccAddr = GetEmailByCode("CB") ' Data sayfasýndan CB emailini al
+    Dim subj As String: subj = "AI Özeti - " & Format(Date, "dd.MM.yyyy")
+    Dim htmlBody As String
+    
+    htmlBody = "<div style='font-family:Segoe UI;'>" & _
+               "<h3 style='color:#0078D4;margin-bottom:4px;'>Toplantý/Ýþ Planý AI Özeti</h3>" & _
+               "<p><strong>Tarih:</strong> " & Format(Date, "dd.MM.yyyy") & "</p>" & _
+               "<hr style='border:0;border-top:1px solid #e1e1e1;'/>" & _
+               "<pre style='white-space:pre-wrap; font-size:14px;'>" & HtmlEncode(ans) & "</pre>" & _
+               "</div>"
+    
+    SendViaOutlook toAddr, ccAddr, subj, htmlBody
+    
+    LogToSysLog toAddr, "Gündem", "AI_Mail"
+    MsgBox "E-posta gönderildi.", vbInformation
+End Sub
+
+Private Function GetEmailByCode(code As String) As String
+    ' Data sayfasý: Kod, Adý Soyadý, Görevi, Mail Adresi...
+    On Error Resume Next
+    Dim ws As Worksheet: Set ws = ThisWorkbook.Worksheets("Data")
+    Dim lastRow As Long: lastRow = ws.Cells(ws.Rows.Count, "A").End(xlUp).Row
+    Dim i As Long
+    For i = 2 To lastRow
+        If Trim(ws.Cells(i, 1).value) = code Then
+            GetEmailByCode = ExtractEmail(ws.Cells(i, 4).value)
+            Exit For
+        End If
+    Next i
+End Function
+
+Private Function ExtractEmail(textVal As String) As String
+    ' Hücrede [name@domain] formatý varsa e-posta adresini ayýklar
+    Dim s As String: s = textVal
+    s = Replace(s, "mailto:", "")
+    s = Replace(s, "[", "")
+    s = Replace(s, "]", "")
+    ExtractEmail = s
+End Function
+
+Private Sub SendViaOutlook(toAddr As String, ccAddr As String, subj As String, htmlBody As String)
+    Dim olApp As Object, mail As Object
+    Set olApp = CreateObject("Outlook.Application")
+    Set mail = olApp.CreateItem(0)
+    With mail
+        .To = toAddr
+        If Len(Trim(ccAddr)) > 0 Then .CC = ccAddr
+        .Subject = subj
+        .htmlBody = htmlBody
+        .Send
+    End With
+End Sub
+
+Private Function HtmlEncode(ByVal s As String) As String
+    s = Replace(s, "&", "&amp;")
+    s = Replace(s, "<", "&lt;")
+    s = Replace(s, ">", "&gt;")
+    HtmlEncode = s
+End Function
+
+
+
+/* ===== END FILE: ./modMail.bas ===== */
+
+/* ===== FILE: ./modPrompt.bas ===== */
+
+Attribute VB_Name = "modPrompt"
+
+Option Explicit
+
+Public Function BuildSmartPrompt(question As String, ctx As String) As String
+    Dim q As String: q = LCase$(Trim$(question))
+    Dim styleGuide As String
+    Dim outputFormat As String
+
+    styleGuide = _
+        "Sen bir toplantý karar takip ve iþ planý asistanýsýn." & vbCrLf & _
+        "Cevap Türkçe olacak. Kýsa, net, madde madde yaz." & vbCrLf & _
+        "Sadece verilen BAÐLAM'a dayan; uydurma bilgi verme." & vbCrLf & _
+        "Mümkünse sayfa adlarýný (Koordinasyon/Sipariþ/Þikayet/Atýl_Stok/Kalite) belirt." & vbCrLf
+
+    outputFormat = _
+        "Çýktý formatý:" & vbCrLf & _
+        "1) Genel durum (Toplam/Açýk/Gecikmiþ/Bugün planlý)" & vbCrLf & _
+        "2) En kritik 3 konu (kýsa gerekçe)" & vbCrLf & _
+        "3) Önerilen aksiyonlar (maks 5 madde)" & vbCrLf
+
+    If InStr(q, "gecik") > 0 Or InStr(q, "geç") > 0 Or InStr(q, "overdue") > 0 Then
+        outputFormat = _
+            "Çýktý formatý (GECÝKENLER):" & vbCrLf & _
+            "- Sayfa bazýnda gecikmiþ sayýsý" & vbCrLf & _
+            "- Risk/etki (kýsa)" & vbCrLf & _
+            "- Ýlk 5 öncelik (neden?)" & vbCrLf & _
+            "- Hýzlý aksiyon önerisi (maks 5 madde)" & vbCrLf
+    End If
+
+    If InStr(q, "bugün") > 0 Or InStr(q, "today") > 0 Then
+        outputFormat = _
+            "Çýktý formatý (BUGÜN):" & vbCrLf & _
+            "- Bugün planlý maddeler: sayfa bazýnda adet" & vbCrLf & _
+            "- Bugün en kritik 3 baþlýk" & vbCrLf & _
+            "- Engeller/Riskler" & vbCrLf & _
+            "- Gün sonu hedefi" & vbCrLf
+    End If
+
+    If InStr(q, "risk") > 0 Or InStr(q, "kritik") > 0 Or InStr(q, "acil") > 0 Then
+        outputFormat = _
+            "Çýktý formatý (RÝSK/KRÝTÝK):" & vbCrLf & _
+            "- En kritik 5 risk (sayfa + kýsa açýklama)" & vbCrLf & _
+            "- Etki (Yüksek/Orta/Düþük) + gerekçe" & vbCrLf & _
+            "- Önleyici aksiyon önerisi" & vbCrLf
+    End If
+
+    If InStr(q, "mail") > 0 Or InStr(q, "e-posta") > 0 Or InStr(q, "gönder") > 0 Then
+        outputFormat = _
+            "Çýktý formatý (MAÝL UYUMLU):" & vbCrLf & _
+            "- Konu önerisi (1 satýr)" & vbCrLf & _
+            "- 5 satýrlýk yönetici özeti" & vbCrLf & _
+            "- Madde madde aksiyon listesi (maks 7 madde)" & vbCrLf
+    End If
+
+    BuildSmartPrompt = _
+        styleGuide & vbCrLf & _
+        outputFormat & vbCrLf & _
+        "BAÐLAM:" & vbCrLf & ctx & vbCrLf & vbCrLf & _
+        "SORU:" & vbCrLf & question
+        
+    
+    If InStr(q, "koordinasyon") = 0 And InStr(q, "sipariþ") = 0 And InStr(q, "þikayet") = 0 And InStr(q, "kalite") = 0 And InStr(q, "atýl") = 0 And InStr(q, "aksiyon") = 0 Then
+        ' Genel soru: baðlamý minimum tut
+        BuildSmartPrompt = styleGuide & vbCrLf & _
+                        "Genel bir soru. Dosya baðlamýna ihtiyaç yoksa kullanma." & vbCrLf & _
+                        "SORU:" & vbCrLf & question
+        Exit Function
+    End If
+    
+End Function
+
+/* ===== END FILE: ./modPrompt.bas ===== */
+
+/* ===== FILE: ./modUI.bas ===== */
+
+Attribute VB_Name = "modUI"
+
+'=== Modül: modUI ===
+Option Explicit
+
+Sub SetupAgendaUI()
+    Dim ws As Worksheet: Set ws = ThisWorkbook.Worksheets("Gündem")
+    With ws
+        .Range("A1").value = "AI Sohbet"
+        .Range("A3").value = "Soru:"
+        .Range("A6").value = "Cevap:"
+        .Range("B3").ClearContents
+        .Range("B6:B20").ClearContents
+        .Range("B3").Name = "rngAI_Question"
+        .Range("B6:B20").Name = "rngAI_Answer"
+        .Range("B6:B20").WrapText = True
+    End With
+    
+    ' Buton: Soruyu Çalýþtýr
+    AddSheetButton "Gündem", "Soruyu Çalýþtýr", "AskAI_Run", 100, 30, "D3"
+    ' Buton: Temizle
+    AddSheetButton "Gündem", "Temizle", "AskAI_Clear", 100, 30, "E3"
+    ' Buton: Mail Gönder
+    AddSheetButton "Gündem", "Mail Gönder", "AskAI_SendMail", 120, 30, "F3"
+End Sub
+
+Private Sub AddSheetButton(sheetName As String, caption As String, macroName As String, w As Double, h As Double, topLeftCell As String)
+    Dim ws As Worksheet: Set ws = ThisWorkbook.Worksheets(sheetName)
+    Dim shp As Shape
+    Set shp = ws.Shapes.AddShape(msoShapeRoundedRectangle, ws.Range(topLeftCell).left, ws.Range(topLeftCell).Top, w, h)
+    With shp
+        .TextFrame.Characters.text = caption
+        .OnAction = "'" & ThisWorkbook.Name & "'!" & macroName
+        .Fill.ForeColor.RGB = RGB(0, 120, 215)
+        .Line.Visible = msoFalse
+        .TextFrame.HorizontalAlignment = xlHAlignCenter
+        .TextFrame.VerticalAlignment = xlVAlignCenter
+        .TextFrame.Characters.Font.Color = vbWhite
+        .TextFrame.Characters.Font.Bold = True
+    End With
+End Sub
+
+
+Public Sub SetupAgendaUI_Pro()
+    Dim ws As Worksheet: Set ws = ThisWorkbook.Worksheets("Gündem")
+    Dim i As Long
+    
+    Application.ScreenUpdating = False
+    
+    ' Eski shape'leri temizle (butonlar vs.)
+    For i = ws.Shapes.Count To 1 Step -1
+        ws.Shapes(i).Delete
+    Next i
+    
+    ' Sayfayý düzenle
+    ws.Cells.Clear
+    
+    ' Kolon geniþlikleri (okunaklý panel)
+    ws.Columns("A").ColumnWidth = 14
+    ws.Columns("B").ColumnWidth = 18
+    ws.Columns("C").ColumnWidth = 18
+    ws.Columns("D").ColumnWidth = 18
+    ws.Columns("E").ColumnWidth = 18
+    ws.Columns("F").ColumnWidth = 18
+    ws.Columns("G").ColumnWidth = 18
+    ws.Columns("H").ColumnWidth = 18
+    
+    ' Baþlýk
+    With ws.Range("A1:H1")
+        .Merge
+        .value = "AI Sohbet (Aksiyon Listesi Asistaný)"
+        .Font.Size = 16
+        .Font.Bold = True
+        .Interior.Color = RGB(0, 120, 215)
+        .Font.Color = vbWhite
+        .HorizontalAlignment = xlHAlignLeft
+        .VerticalAlignment = xlVAlignCenter
+        .RowHeight = 34
+        .IndentLevel = 1
+    End With
+    
+    ' Açýklama satýrý
+    With ws.Range("A2:H2")
+        .Merge
+        .value = "Soru yazýn › Soruyu Çalýþtýr › Cevabý görüntüleyin / Tek tuþ mail gönderin."
+        .Font.Size = 10
+        .Font.Color = RGB(60, 60, 60)
+        .HorizontalAlignment = xlHAlignLeft
+        .RowHeight = 18
+        .IndentLevel = 1
+    End With
+    
+    ' Soru etiketi + soru kutusu
+    ws.Range("A4").value = "Soru:"
+    ws.Range("A4").Font.Bold = True
+    With ws.Range("B4:H5")
+        .Merge
+        .Name = "rngAI_Question"
+        .value = ""
+        .WrapText = True
+        .Font.Size = 11
+        .Interior.Color = RGB(245, 245, 245)
+        .Borders.LineStyle = xlContinuous
+        .RowHeight = 24
+    End With
+    
+    ' Butonlar alaný (A7:H7)
+    ws.Rows(7).RowHeight = 28
+    
+    AddSheetButtonPro ws, "Soruyu Çalýþtýr", "AskAI_Run", "B7", 140, 28, RGB(0, 120, 215)
+    AddSheetButtonPro ws, "Temizle", "AskAI_Clear", "D7", 100, 28, RGB(90, 90, 90)
+    AddSheetButtonPro ws, "Mail Gönder", "AskAI_SendMail", "E7", 120, 28, RGB(0, 153, 51)
+    
+    ' Cevap etiketi + cevap paneli
+    ws.Range("A9").value = "Cevap:"
+    ws.Range("A9").Font.Bold = True
+    
+    With ws.Range("B9:H30")
+        .Merge
+        .Name = "rngAI_Answer"
+        .value = ""
+        .WrapText = True
+        .Font.Size = 11
+        .Interior.Color = RGB(255, 255, 255)
+        .Borders.LineStyle = xlContinuous
+        .VerticalAlignment = xlVAlignTop
+        .HorizontalAlignment = xlHAlignLeft
+    End With
+    
+    ws.Range("B9:H30").IndentLevel = 1
+    
+    Application.ScreenUpdating = True
+End Sub
+
+Private Sub AddSheetButtonPro(ws As Worksheet, caption As String, macroName As String, topLeftCell As String, w As Double, h As Double, fillRGB As Long)
+    Dim shp As Shape
+    Set shp = ws.Shapes.AddShape(msoShapeRoundedRectangle, ws.Range(topLeftCell).left, ws.Range(topLeftCell).Top, w, h)
+    With shp
+        .TextFrame.Characters.text = caption
+        .OnAction = "'" & ThisWorkbook.Name & "'!" & macroName  ' <-- çok önemli
+        .Fill.ForeColor.RGB = fillRGB
+        .Line.Visible = msoFalse
+        .TextFrame.HorizontalAlignment = xlHAlignCenter
+        .TextFrame.VerticalAlignment = xlVAlignCenter
+        .TextFrame.Characters.Font.Color = vbWhite
+        .TextFrame.Characters.Font.Bold = True
+        .TextFrame.Characters.Font.Size = 10
+    End With
+End Sub
+
+
+Sub AskAI_Clear()
+    Dim ws As Worksheet: Set ws = ThisWorkbook.Worksheets("Gündem")
+       ws.Range("rngAI_Question").MergeArea.ClearContents
+    ws.Range("rngAI_Answer").MergeArea.ClearContents
+End Sub
+
+
+/* ===== END FILE: ./modUI.bas ===== */
+
