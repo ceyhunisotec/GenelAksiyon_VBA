@@ -109,4 +109,4 @@ jobs:
             -H "Accept: application/vnd.github+json" \
             -H "Content-Type: application/json" \
             --data @body.json \
-            "${API_PUT}" |
+            "${API_PUT}"
