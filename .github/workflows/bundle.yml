@@ -52,26 +52,40 @@ jobs:
         run: |
           set -euo pipefail
 
+          # GitHub Actions hazır env'leri (URL bozulmasını bitirir)
           OWNER="$GITHUB_REPOSITORY_OWNER"
           REPO="${GITHUB_REPOSITORY#*/}"
-          PATH_IN_REPO="_bundle/ALL_CODE.txt"
           BRANCH="main"
+          PATH_IN_REPO="_bundle/ALL_CODE.txt"
 
           # Dosya var mı?
           test -s _bundle/ALL_CODE.txt
 
-          # Base64'i argüman olarak taşımayacağız: dosyaya yazacağız
+          # jq yoksa kur (ubuntu runner’da genelde var ama garanti olsun)
+          if ! command -v jq >/dev/null 2>&1; then
+            sudo apt-get update -y
+            sudo apt-get install -y jq
+          fi
+
+          # base64'i argüman taşımayacağız (argument list too long bitti)
           base64 -w 0 _bundle/ALL_CODE.txt > _bundle/ALL_CODE.b64
           test -s _bundle/ALL_CODE.b64
 
-          # Dosya varsa SHA al (update için), yoksa create
-          API_GET="https://api.github.com/repos/${OWNER}/${REPO}/contents/${PATH_IN_REPO}?ref=${BRANCH}"
+          # URL’leri GITHUB_API_URL ile kur (curl: (3) biter)
+          API_GET="${GITHUB_API_URL}/repos/${OWNER}/${REPO}/contents/${PATH_IN_REPO}?ref=${BRANCH}"
+          API_PUT="${GITHUB_API_URL}/repos/${OWNER}/${REPO}/contents/${PATH_IN_REPO}"
+
+          echo "DEBUG API_GET = $API_GET"
+          echo "DEBUG API_PUT = $API_PUT"
+          echo "DEBUG OWNER/REPO = $OWNER/$REPO"
+
+          # Dosya varsa sha al (update için), yoksa create
           SHA="$(curl -sS \
             -H "Authorization: Bearer ${GH_TOKEN}" \
             -H "Accept: application/vnd.github+json" \
             "${API_GET}" | jq -r '.sha // empty')"
 
-          # JSON'u jq ile, içeriği dosyadan (rawfile) okuyarak üret
+          # JSON body’yi jq ile, içeriği dosyadan (rawfile) okuyarak üret
           if [ -n "$SHA" ]; then
             echo "Updating existing file: sha=$SHA"
             jq -n \
@@ -89,10 +103,10 @@ jobs:
               '{message:$message, content:$content, branch:$branch}' > body.json
           fi
 
-          API_PUT="https://api.github.com/repos/${OWNER}/${REPO}/contents/${PATH_IN_REPO}"
+          # Repo’ya yaz
           curl -sS -X PUT \
             -H "Authorization: Bearer ${GH_TOKEN}" \
             -H "Accept: application/vnd.github+json" \
             -H "Content-Type: application/json" \
             --data @body.json \
-           
+            "${API_PUT}" |
