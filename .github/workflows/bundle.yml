@@ -1,0 +1,39 @@
+
+name: Build VBA Bundle
+
+on:
+  push:
+    branches: [ "main" ]
+  workflow_dispatch:
+
+jobs:
+  bundle:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Create bundle
+        run: |
+          mkdir -p _bundle
+          echo "### GenelAksiyon_VBA - TOPLU KOD DÖKÜMÜ" > _bundle/ALL_CODE.txt
+          echo "### Güncelleme: $(date -u)" >> _bundle/ALL_CODE.txt
+          echo "" >> _bundle/ALL_CODE.txt
+
+          # Sadece metin modüller: .bas ve .cls
+          # (İsterseniz .frm da ekleriz)
+          for f in $(find . -maxdepth 2 -type f \( -name "*.bas" -o -name "*.cls" -o -name "*.frm" \) | sort); do
+            echo "/* ===== FILE: $f ===== */" >> _bundle/ALL_CODE.txt
+            echo "" >> _bundle/ALL_CODE.txt
+            cat "$f" >> _bundle/ALL_CODE.txt
+            echo "" >> _bundle/ALL_CODE.txt
+            echo "/* ===== END FILE: $f ===== */" >> _bundle/ALL_CODE.txt
+            echo "" >> _bundle/ALL_CODE.txt
+          done
+
+      - name: Commit bundle
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add _bundle/ALL_CODE.txt
+          git diff --cached --quiet || git commit -m "Auto: update VBA bundle"
