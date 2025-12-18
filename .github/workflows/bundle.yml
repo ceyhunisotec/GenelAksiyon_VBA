@@ -52,36 +52,48 @@ jobs:
         run: |
           set -euo pipefail
 
-          OWNER="${{ github.repository_owner }}"
-          REPO="$(echo "${{ github.repository }}" | cut -d/ -f2)"
+          # GitHub Actions'ın hazır env değişkenleri (brace problemi yok)
+          OWNER="$GITHUB_REPOSITORY_OWNER"
+          REPO="${GITHUB_REPOSITORY#*/}"
           PATH_IN_REPO="_bundle/ALL_CODE.txt"
           BRANCH="main"
 
-          # base64 (tek satır)
+          # Dosya gerçekten var mı?
+          test -s _bundle/ALL_CODE.txt
+
+          # base64 tek satır (Linux)
           CONTENT_B64="$(base64 -w 0 _bundle/ALL_CODE.txt)"
 
-          # Dosya varsa SHA'sını al (update için), yoksa create
-          API_URL="https://api.github.com/repos/${OWNER}/${REPO}/contents/${PATH_IN_REPO}?ref=${BRANCH}"
+          # Mevcut dosya varsa sha'sını al
+          API_GET="https://api.github.com/repos/${OWNER}/${REPO}/contents/${PATH_IN_REPO}?ref=${BRANCH}"
+          SHA="$(curl -sS \
+            -H "Authorization: Bearer ${GH_TOKEN}" \
+            -H "Accept: application/vnd.github+json" \
+            "${API_GET}" | jq -r '.sha // empty')"
 
-          SHA="$(curl -sS -H "Authorization: Bearer ${GH_TOKEN}" -H "Accept: application/vnd.github+json" \
-                 "$API_URL" | sed -n 's/.*"sha"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' | head -n 1)"
-
-          if [ -n "${SHA}" ]; then
-            echo "Updating existing file with sha=${SHA}"
-            BODY=$(printf '{"message":"Auto: update VBA bundle","content":"%s","sha":"%s","branch":"%s"}' \
-                  "${CONTENT_B64}" "${SHA}" "${BRANCH}")
+          # JSON gövdesini jq ile üret (kaçış derdi yok)
+          if [ -n "$SHA" ]; then
+            echo "Updating existing file: sha=$SHA"
+            jq -n \
+              --arg message "Auto: update VBA bundle" \
+              --arg content "$CONTENT_B64" \
+              --arg sha "$SHA" \
+              --arg branch "$BRANCH" \
+              '{message:$message, content:$content, sha:$sha, branch:$branch}' > body.json
           else
             echo "Creating new file"
-            BODY=$(printf '{"message":"Auto: update VBA bundle","content":"%s","branch":"%s"}' \
-                  "${CONTENT_B64}" "${BRANCH}")
+            jq -n \
+              --arg message "Auto: update VBA bundle" \
+              --arg content "$CONTENT_B64" \
+              --arg branch "$BRANCH" \
+              '{message:$message, content:$content, branch:$branch}' > body.json
           fi
 
+          # Dosyayı repo'ya yaz
+          API_PUT="https://api.github.com/repos/${OWNER}/${REPO}/contents/${PATH_IN_REPO}"
           curl -sS -X PUT \
             -H "Authorization: Bearer ${GH_TOKEN}" \
             -H "Accept: application/vnd.github+json" \
             -H "Content-Type: application/json" \
-            --data "${BODY}" \
-            "https://api.github.com/repos/${OWNER}/${REPO}/contents/${PATH            "https://api.github.com/repos/${OWNER}/${REPO}/contents/${PATH_IN_REPO}" \
-            | head -c 400
-
-          echo ""
+            --data @body.json \
+            "${API_PUT}" | jq -r '.
