@@ -52,31 +52,31 @@ jobs:
         run: |
           set -euo pipefail
 
-          # GitHub Actions'ın hazır env değişkenleri (brace problemi yok)
           OWNER="$GITHUB_REPOSITORY_OWNER"
           REPO="${GITHUB_REPOSITORY#*/}"
           PATH_IN_REPO="_bundle/ALL_CODE.txt"
           BRANCH="main"
 
-          # Dosya gerçekten var mı?
+          # Dosya var mı?
           test -s _bundle/ALL_CODE.txt
 
-          # base64 tek satır (Linux)
-          CONTENT_B64="$(base64 -w 0 _bundle/ALL_CODE.txt)"
+          # Base64'i argüman olarak taşımayacağız: dosyaya yazacağız
+          base64 -w 0 _bundle/ALL_CODE.txt > _bundle/ALL_CODE.b64
+          test -s _bundle/ALL_CODE.b64
 
-          # Mevcut dosya varsa sha'sını al
+          # Dosya varsa SHA al (update için), yoksa create
           API_GET="https://api.github.com/repos/${OWNER}/${REPO}/contents/${PATH_IN_REPO}?ref=${BRANCH}"
           SHA="$(curl -sS \
             -H "Authorization: Bearer ${GH_TOKEN}" \
             -H "Accept: application/vnd.github+json" \
             "${API_GET}" | jq -r '.sha // empty')"
 
-          # JSON gövdesini jq ile üret (kaçış derdi yok)
+          # JSON'u jq ile, içeriği dosyadan (rawfile) okuyarak üret
           if [ -n "$SHA" ]; then
             echo "Updating existing file: sha=$SHA"
             jq -n \
               --arg message "Auto: update VBA bundle" \
-              --arg content "$CONTENT_B64" \
+              --rawfile content _bundle/ALL_CODE.b64 \
               --arg sha "$SHA" \
               --arg branch "$BRANCH" \
               '{message:$message, content:$content, sha:$sha, branch:$branch}' > body.json
@@ -84,16 +84,15 @@ jobs:
             echo "Creating new file"
             jq -n \
               --arg message "Auto: update VBA bundle" \
-              --arg content "$CONTENT_B64" \
+              --rawfile content _bundle/ALL_CODE.b64 \
               --arg branch "$BRANCH" \
               '{message:$message, content:$content, branch:$branch}' > body.json
           fi
 
-          # Dosyayı repo'ya yaz
           API_PUT="https://api.github.com/repos/${OWNER}/${REPO}/contents/${PATH_IN_REPO}"
           curl -sS -X PUT \
             -H "Authorization: Bearer ${GH_TOKEN}" \
             -H "Accept: application/vnd.github+json" \
             -H "Content-Type: application/json" \
             --data @body.json \
-            "${API_PUT}" | jq -r '.
+           
