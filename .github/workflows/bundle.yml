@@ -47,6 +47,7 @@ jobs:
           # Dosya var mı ve boş değil mi?
           test -s "$OUT"
 
+      
       - name: Commit bundle
         shell: bash
         run: |
@@ -54,18 +55,21 @@ jobs:
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
 
-          # Dosya gerçekten oluştu mu?
+          # Dosya gerçekten var mı?
           ls -la _bundle
           test -s _bundle/ALL_CODE.txt
 
-          git add _bundle/ALL_CODE.txt
-          git status --porcelain
+          # Force add: ignore olsa bile stage et
+                   git add -f _bundle/ALL_CODE.txt
 
-          # Değişiklik yoksa commit atma
+          # Staged değişiklik var mı görelim
+          git status --porcelain
+          git diff --cached --stat
+
+          # Değişiklik yoksa bile (çok nadir) uyarı basıp çık
           if git diff --cached --quiet; then
-            echo "No changes in bundle; skipping commit."
+            echo "Bundle staged değil / değişiklik yok görünüyor. Log'a bakın."
             exit 0
           fi
 
           git commit -m "Auto: update VBA bundle"
-         
