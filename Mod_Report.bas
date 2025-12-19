@@ -30,56 +30,106 @@ Private Function HexColorToRGB(ByVal hexColor As String) As Long
     HexColorToRGB = RGB(r, g, b)
 End Function
 
-'== Sayfada TEK logo garantisi: varsa birini býrakýr, fazlalarý siler; yoksa LOGO_PATH/Assets'tan ekler ==
+'== Sayfada TEK logo garantisi (ROBUST): varsa birini býrakýr, yoksa dosyadan ekler.
+'   Copy/Paste yerine AddPicture kullanýr (PDF export sýrasýnda logo kaybolmasýný engeller)
 Private Function EnsureSingleLogo(ByVal ws As Worksheet, Optional ByVal desiredWidth As Single = 230) As Shape
     On Error Resume Next
 
     Dim s As Shape, base As Shape
-    ' Mevcut logolarý tara (isim/alt yazýda "logo" geçen resimler)
+    ' 1) Varsa mevcut Report_Logo'yu kullan (fazlalarý sil)
     For Each s In ws.Shapes
         If (s.Type = msoPicture Or s.Type = msoLinkedPicture) Then
-            If InStr(1, LCase$(s.Name), "logo") > 0 Or InStr(1, LCase$(s.AlternativeText), "logo") > 0 Then
+            If LCase$(s.Name) Like "*report_logo*" Or LCase$(s.AlternativeText) Like "*report_logo*" Or _
+               InStr(1, LCase$(s.Name), "logo") > 0 Or InStr(1, LCase$(s.AlternativeText), "logo") > 0 Then
                 If base Is Nothing Then
                     Set base = s
-                    base.Name = "Report_Logo": base.AlternativeText = "Report_Logo"
+                    base.Name = "Report_Logo"
+                    base.AlternativeText = "Report_Logo"
                 Else
-                    s.Delete ' fazlayý temizle -> çift logo engeli
+                    s.Delete
                 End If
             End If
         End If
     Next s
 
-    ' Hiç logo yoksa ekle
+    ' 2) Logo yoksa: LOGO_PATH varsa onu ekle; yoksa Assets/CompanyLogo'yu TEMP'e export edip ekle
     If base Is Nothing Then
-        If Len(Trim$(LOGO_PATH)) > 0 And Len(Dir(LOGO_PATH)) > 0 Then
-            Set base = ws.Shapes.AddPicture(LOGO_PATH, False, True, 0, 0, desiredWidth, desiredWidth * 0.45)
-        Else
-            ' Assets sayfasýndaki CompanyLogo varsa kopyala
-            On Error Resume Next
-            ThisWorkbook.Worksheets("Assets").Shapes("CompanyLogo").Copy
-            ws.Paste
-            If Err.Number = 0 Then
-                Set base = ws.Shapes(ws.Shapes.Count)
-                base.LockAspectRatio = msoTrue
-                base.width = desiredWidth
-            End If
-            Err.Clear
+        Dim logoFile As String
+        logoFile = GetLogoFilePathSafe()   ' LOGO_PATH veya exported temp png
+
+        If Len(logoFile) > 0 And Len(Dir(logoFile)) > 0 Then
+            Set base = ws.Shapes.AddPicture( _
+                        Filename:=logoFile, _
+                        LinkToFile:=msoFalse, _
+                        SaveWithDocument:=msoTrue, _
+                        left:=0, Top:=0, width:=desiredWidth, Height:=desiredWidth * 0.45)
         End If
     End If
 
-    ' Konum ve öne getir
+    ' 3) Konum/ölçek/print garantisi
     If Not base Is Nothing Then
         base.LockAspectRatio = msoTrue
         base.width = desiredWidth
         base.left = ws.Range("A1").left + 12
         base.Top = ws.Range("A1").Top + 10
         base.ZOrder msoBringToFront
+
+        ' PDF'de kaybolmamasý için kritik ayarlar
+        base.Visible = msoTrue
+        base.PrintObject = True
+        base.Placement = xlMoveAndSize
+
         base.Name = "Report_Logo"
         base.AlternativeText = "Report_Logo"
     End If
 
     On Error GoTo 0
     Set EnsureSingleLogo = base
+End Function
+
+
+' LOGO_PATH çalýþýyorsa onu döndürür, çalýþmýyorsa Assets/CompanyLogo'yu TEMP'e export eder ve path döndürür
+Private Function GetLogoFilePathSafe() As String
+    On Error Resume Next
+
+    ' 1) Mod_Settings içindeki LOGO_PATH
+    If Len(Trim$(LOGO_PATH)) > 0 Then
+        If Len(Dir(LOGO_PATH)) > 0 Then
+            GetLogoFilePathSafe = LOGO_PATH
+            Exit Function
+        End If
+    End If
+
+    ' 2) Assets sayfasýndaki CompanyLogo'yu export et
+    GetLogoFilePathSafe = ExportAssetsLogoToTempPng()
+End Function
+
+
+' Assets!CompanyLogo þeklinin PNG çýktýsýný TEMP'e alýr
+Private Function ExportAssetsLogoToTempPng() As String
+    On Error GoTo Fail
+
+    Dim tmpPng As String
+    tmpPng = Environ$("TEMP") & "\isotec_company_logo.png"
+
+    Dim wsA As Worksheet
+    Set wsA = ThisWorkbook.Worksheets("Assets")
+
+    Dim shp As Shape
+    Set shp = wsA.Shapes("CompanyLogo")
+
+    ' Export baþarýlýysa dosya oluþur
+    shp.Export Filename:=tmpPng, FilterName:="PNG"
+
+    If Len(Dir(tmpPng)) > 0 Then
+        ExportAssetsLogoToTempPng = tmpPng
+    Else
+        ExportAssetsLogoToTempPng = ExportAssetsLogoToTempPng = ""
+    End If
+    Exit Function
+
+Fail:
+    ExportAssetsLogoToTempPng = ""
 End Function
 
 '== Logonun SAÐINA tema bantlý BÜYÜK baþlýk ==
@@ -201,17 +251,35 @@ Private Function EnsureSysLogSheet() As Worksheet
 End Function
 
 ' Mod_Report.bas içindeki sürümün yerine
-Private Function HasDailyMailSent(ByVal email As String, Optional ByVal scope As String = "global", Optional ByVal sheetName As String = "") As Boolean
-    Dim ws As Worksheet, lastRow As Long, i As Long, d0 As Long, di As Long, e As String, sh As String
+Private Function HasDailyMailSent(ByVal email As String, _
+                                  Optional ByVal scope As String = "global", _
+                                  Optional ByVal sheetName As String = "", _
+                                  Optional ByVal slot As String = "") As Boolean
+    Dim ws As Worksheet, lastRow As Long, i As Long, d0 As Long, di As Long
+    Dim e As String, sh As String, note As String
+
     Set ws = EnsureSysLogSheet()
     lastRow = ws.Cells(ws.Rows.Count, "A").End(xlUp).Row
     d0 = CLng(Date)
+
     For i = 2 To lastRow
         If Not IsEmpty(ws.Cells(i, "A").value) Then
-            On Error Resume Next: di = CLng(CDate(ws.Cells(i, "A").value)): On Error GoTo 0
+            On Error Resume Next
+            di = CLng(CDate(ws.Cells(i, "A").value))
+            On Error GoTo 0
+
             If di = d0 Then
                 e = LCase$(Trim$(CStr(ws.Cells(i, "B").value)))
                 sh = CStr(ws.Cells(i, "C").value)
+                note = CStr(ws.Cells(i, "D").value)
+
+                ' Sadece gecikmiþ rapor notlarýnda slot kontrolü uygula
+                If InStr(1, note, "OverdueReport", vbTextCompare) > 0 Then
+                    If Len(slot) > 0 Then
+                        If InStr(1, note, "-" & slot, vbTextCompare) = 0 Then GoTo ContinueLoop
+                    End If
+                End If
+
                 If LCase$(Trim$(email)) = e Then
                     If LCase$(scope) = "sheet" Then
                         If sh = sheetName Then HasDailyMailSent = True: Exit Function
@@ -221,20 +289,23 @@ Private Function HasDailyMailSent(ByVal email As String, Optional ByVal scope As
                 End If
             End If
         End If
+ContinueLoop:
     Next i
 End Function
 
-Private Sub MarkDailyMailSent(ByVal email As String, ByVal sheetName As String)
-    Dim ws As Worksheet, nextRow As Long
+Private Sub MarkDailyMailSent(ByVal email As String, ByVal sheetName As String, Optional ByVal slot As String = "")
+    Dim ws As Worksheet, nextRow As Long, noteVal As String
     Set ws = EnsureSysLogSheet()
     nextRow = ws.Cells(ws.Rows.Count, "A").End(xlUp).Row + 1
+    noteVal = "OverdueReport" & IIf(Len(slot) > 0, "-" & slot, "")
     ws.Cells(nextRow, "A").value = Date
     ws.Cells(nextRow, "B").value = email
     ws.Cells(nextRow, "C").value = sheetName
-    ws.Cells(nextRow, "D").value = "OverdueReport"
+    ws.Cells(nextRow, "D").value = noteVal
 End Sub
 
-Private Function BuildOverdueRecipients(ByVal ws As Worksheet) As Collection
+
+Private Function BuildOverdueRecipients(ByVal ws As Worksheet, Optional ByVal slot As String = "") As Collection
     Dim col As New Collection
     Dim lastRow As Long, r As Long
     Dim vJ As Variant, planDate As Variant, addr As String
@@ -248,7 +319,7 @@ Private Function BuildOverdueRecipients(ByVal ws As Worksheet) As Collection
                     If CDate(planDate) < Date Then
                         addr = ResolveRecipient(CStr(ws.Cells(r, "F").value))
                         If Len(addr) > 0 Then
-                            If Not HasDailyMailSent(addr, "sheet", ws.Name) Then
+                            If Not HasDailyMailSent(addr, "sheet", ws.Name, slot) Then
                                 On Error Resume Next
                                 col.Add addr, key:=LCase$(addr)
                                 On Error GoTo 0
@@ -281,7 +352,7 @@ End Function
 
 
 
-Public Sub SendOverdueReportForSheet(ByVal ws As Worksheet)
+Public Sub SendOverdueReportForSheet(ByVal ws As Worksheet, Optional ByVal slot As String = "")
     Dim recipients As Collection, i As Long
     Dim OutApp As Object, OutMail As Object
     Dim subjectText As String, html As String, pdfPath As String
@@ -301,7 +372,7 @@ Public Sub SendOverdueReportForSheet(ByVal ws As Worksheet)
     Set dCloseCnt = CreateObject("Scripting.Dictionary")
 
     ' 1) Alýcýlar (ayný kiþi günde 1 kez)
-    Set recipients = BuildOverdueRecipients(ws)
+    Set recipients = BuildOverdueRecipients(ws, slot)
     If recipients Is Nothing Then Exit Sub
     If recipients.Count = 0 Then Exit Sub
 
@@ -483,7 +554,7 @@ Public Sub SendOverdueReportForSheet(ByVal ws As Worksheet)
     End With
 
     For i = 1 To recipients.Count
-        Call MarkDailyMailSent(recipients(i), ws.Name)
+        Call MarkDailyMailSent(recipients(i), ws.Name, slot)
        Next i
 
 CleanExit:
@@ -650,5 +721,14 @@ Fail:
     Application.ScreenUpdating = True
     ExportOverduePDF_FilteredCopy = ""
 End Function
+
+Public Sub RunDailyOverdueReports_WithSlot(ByVal slot As String)
+    Dim ws As Worksheet
+    For Each ws In ThisWorkbook.Worksheets
+        If IsMeetingSheet(ws) Then
+            SendOverdueReportForSheet ws, slot
+        End If
+    Next ws
+End Sub
 
 
