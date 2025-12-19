@@ -145,7 +145,7 @@ Public Function SendTaskMail(ByVal ws As Worksheet, ByVal r As Long, Optional By
 
     SendTaskMail = True
 
-CleanUp:
+CLEANUP:
     On Error Resume Next
     Set recp = Nothing
     Set OutMail = Nothing
@@ -154,7 +154,7 @@ CleanUp:
 
 ErrHandler:
     MsgBox "Mail gönderimi sýrasýnda hata: " & Err.Description, vbCritical, "Outlook hatasý"
-    Resume CleanUp
+    Resume CLEANUP
 End Function
 
 ' === Tamamlanan görev bildirimi: CB & HAO'ya gönder ===
