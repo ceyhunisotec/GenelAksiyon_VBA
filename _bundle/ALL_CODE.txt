@@ -1,5 +1,5 @@
 ### GenelAksiyon_VBA - TOPLU KOD DÖKÜMÜ
-### Güncelleme (UTC): Thu Dec 18 09:43:14 UTC 2025
+### Güncelleme (UTC): Fri Dec 19 06:14:22 UTC 2025
 
 /* ===== FILE: ./BuÇalışmaKitabı.cls ===== */
 
