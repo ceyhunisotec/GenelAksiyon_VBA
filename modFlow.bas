@@ -245,4 +245,3 @@ Private Sub SetMergedText(rng As Range, txt As String)
         rng.WrapText = True
     End If
 End Sub
-
