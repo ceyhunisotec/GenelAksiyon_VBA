@@ -13,6 +13,55 @@ Public gNextRun17 As Date
 ' 08:15 "Bugün Ýþ Planý" zamanlayýcý
 Public gNextRunPlan As Date
 
+Private Function GetScheduleLockFile() As String
+    GetScheduleLockFile = Environ$("TEMP") & "\GenelAksiyon_Schedule.lock"
+End Function
+
+Private Function AcquireScheduleLock() As Boolean
+    Dim lockFile As String
+    lockFile = GetScheduleLockFile()
+
+    If Dir(lockFile) <> "" Then
+        AcquireScheduleLock = False
+        Exit Function
+    End If
+
+    Open lockFile For Output As #1
+    Print #1, Now
+    Close #1
+
+    AcquireScheduleLock = True
+End Function
+
+Private Sub ReleaseScheduleLock()
+    On Error Resume Next
+    Kill GetScheduleLockFile()
+    On Error GoTo 0
+End Sub
+
+
+Public Sub SafeInitDailySchedules()
+
+    If Not AcquireScheduleLock Then
+        Debug.Print "Schedule zaten aktif – tekrar kurulmadý."
+        Exit Sub
+    End If
+
+    On Error GoTo CLEANUP
+
+    ' Önce her þeyi temizle
+    CancelDailySchedule
+    CancelDailyTodayPlans
+
+    ' Sonra TEK NOKTADAN yeniden kur
+    ScheduleDailyOverdueReports
+    ScheduleDailyTodayPlans
+
+CLEANUP:
+    ReleaseScheduleLock
+End Sub
+
+
 '==========================
 '  H E L P E R
 '==========================
