@@ -9,30 +9,29 @@ Attribute VB_PredeclaredId = True
 Attribute VB_Exposed = True
 
 '== ThisWorkbook ==
-Option Explicit
-Private AppEv As CAppEvents
-
 Private Sub Workbook_Open()
     Set AppEv = New CAppEvents
     Set AppEv.App = Application
 
-    ' Dashboard kur
     On Error Resume Next
     Call RebuildDashboard
     On Error GoTo 0
 
-    ' Günlük rapor zamanlama (hafta içi 17:00)
-    Call ScheduleDailyOverdueReports
-    Call ScheduleDailyTodayPlans       ' 08:15 günlük iþ plan
+    ' Önce eski schedule varsa temizle (çift planlamayý engeller)
+    Call CancelDailySchedule
+    Call CancelDailyTodayPlans
+
+    ' Sonra yeniden kur
+    Call ScheduleDailyOverdueReports   ' 09:00 + 17:00 artýk burada kurulacak
+    Call ScheduleDailyTodayPlans       ' 08:15 günlük iþ planý
 End Sub
 
 Private Sub Workbook_BeforeClose(Cancel As Boolean)
     On Error Resume Next
     Set AppEv.App = Nothing
     Set AppEv = Nothing
+
     ' Zamanlamayý iptal et (güvenli)
     Call CancelDailySchedule
     Call CancelDailyTodayPlans
 End Sub
-
-
