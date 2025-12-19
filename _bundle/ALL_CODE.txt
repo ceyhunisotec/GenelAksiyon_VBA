@@ -1,5 +1,5 @@
 ### GenelAksiyon_VBA - TOPLU KOD DÃ–KÃœMÃœ
-### GÃ¼ncelleme (UTC): Fri Dec 19 09:02:29 UTC 2025
+### GÃ¼ncelleme (UTC): Fri Dec 19 09:04:36 UTC 2025
 
 /* ===== FILE: ./BuÃ‡alÄ±ÅŸmaKitabÄ±.cls ===== */
 
@@ -14,33 +14,32 @@ Attribute VB_PredeclaredId = True
 Attribute VB_Exposed = True
 
 '== ThisWorkbook ==
-Option Explicit
-Private AppEv As CAppEvents
-
 Private Sub Workbook_Open()
     Set AppEv = New CAppEvents
     Set AppEv.App = Application
 
-    ' Dashboard kur
     On Error Resume Next
     Call RebuildDashboard
     On Error GoTo 0
 
-    ' Günlük rapor zamanlama (hafta içi 17:00)
-    Call ScheduleDailyOverdueReports
-    Call ScheduleDailyTodayPlans       ' 08:15 günlük iþ plan
+    ' Önce eski schedule varsa temizle (çift planlamayý engeller)
+    Call CancelDailySchedule
+    Call CancelDailyTodayPlans
+
+    ' Sonra yeniden kur
+    Call ScheduleDailyOverdueReports   ' 09:00 + 17:00 artýk burada kurulacak
+    Call ScheduleDailyTodayPlans       ' 08:15 günlük iþ planý
 End Sub
 
 Private Sub Workbook_BeforeClose(Cancel As Boolean)
     On Error Resume Next
     Set AppEv.App = Nothing
     Set AppEv = Nothing
+
     ' Zamanlamayý iptal et (güvenli)
     Call CancelDailySchedule
     Call CancelDailyTodayPlans
 End Sub
-
-
 
 /* ===== END FILE: ./BuÃ‡alÄ±ÅŸmaKitabÄ±.cls ===== */
 
@@ -801,56 +800,106 @@ Private Function HexColorToRGB(ByVal hexColor As String) As Long
     HexColorToRGB = RGB(r, g, b)
 End Function
 
-'== Sayfada TEK logo garantisi: varsa birini býrakýr, fazlalarý siler; yoksa LOGO_PATH/Assets'tan ekler ==
+'== Sayfada TEK logo garantisi (ROBUST): varsa birini býrakýr, yoksa dosyadan ekler.
+'   Copy/Paste yerine AddPicture kullanýr (PDF export sýrasýnda logo kaybolmasýný engeller)
 Private Function EnsureSingleLogo(ByVal ws As Worksheet, Optional ByVal desiredWidth As Single = 230) As Shape
     On Error Resume Next
 
     Dim s As Shape, base As Shape
-    ' Mevcut logolarý tara (isim/alt yazýda "logo" geçen resimler)
+    ' 1) Varsa mevcut Report_Logo'yu kullan (fazlalarý sil)
     For Each s In ws.Shapes
         If (s.Type = msoPicture Or s.Type = msoLinkedPicture) Then
-            If InStr(1, LCase$(s.Name), "logo") > 0 Or InStr(1, LCase$(s.AlternativeText), "logo") > 0 Then
+            If LCase$(s.Name) Like "*report_logo*" Or LCase$(s.AlternativeText) Like "*report_logo*" Or _
+               InStr(1, LCase$(s.Name), "logo") > 0 Or InStr(1, LCase$(s.AlternativeText), "logo") > 0 Then
                 If base Is Nothing Then
                     Set base = s
-                    base.Name = "Report_Logo": base.AlternativeText = "Report_Logo"
+                    base.Name = "Report_Logo"
+                    base.AlternativeText = "Report_Logo"
                 Else
-                    s.Delete ' fazlayý temizle -> çift logo engeli
+                    s.Delete
                 End If
             End If
         End If
     Next s
 
-    ' Hiç logo yoksa ekle
+    ' 2) Logo yoksa: LOGO_PATH varsa onu ekle; yoksa Assets/CompanyLogo'yu TEMP'e export edip ekle
     If base Is Nothing Then
-        If Len(Trim$(LOGO_PATH)) > 0 And Len(Dir(LOGO_PATH)) > 0 Then
-            Set base = ws.Shapes.AddPicture(LOGO_PATH, False, True, 0, 0, desiredWidth, desiredWidth * 0.45)
-        Else
-            ' Assets sayfasýndaki CompanyLogo varsa kopyala
-            On Error Resume Next
-            ThisWorkbook.Worksheets("Assets").Shapes("CompanyLogo").Copy
-            ws.Paste
-            If Err.Number = 0 Then
-                Set base = ws.Shapes(ws.Shapes.Count)
-                base.LockAspectRatio = msoTrue
-                base.width = desiredWidth
-            End If
-            Err.Clear
+        Dim logoFile As String
+        logoFile = GetLogoFilePathSafe()   ' LOGO_PATH veya exported temp png
+
+        If Len(logoFile) > 0 And Len(Dir(logoFile)) > 0 Then
+            Set base = ws.Shapes.AddPicture( _
+                        Filename:=logoFile, _
+                        LinkToFile:=msoFalse, _
+                        SaveWithDocument:=msoTrue, _
+                        left:=0, Top:=0, width:=desiredWidth, Height:=desiredWidth * 0.45)
         End If
     End If
 
-    ' Konum ve öne getir
+    ' 3) Konum/ölçek/print garantisi
     If Not base Is Nothing Then
         base.LockAspectRatio = msoTrue
         base.width = desiredWidth
         base.left = ws.Range("A1").left + 12
         base.Top = ws.Range("A1").Top + 10
         base.ZOrder msoBringToFront
+
+        ' PDF'de kaybolmamasý için kritik ayarlar
+        base.Visible = msoTrue
+        base.PrintObject = True
+        base.Placement = xlMoveAndSize
+
         base.Name = "Report_Logo"
         base.AlternativeText = "Report_Logo"
     End If
 
     On Error GoTo 0
     Set EnsureSingleLogo = base
+End Function
+
+
+' LOGO_PATH çalýþýyorsa onu döndürür, çalýþmýyorsa Assets/CompanyLogo'yu TEMP'e export eder ve path döndürür
+Private Function GetLogoFilePathSafe() As String
+    On Error Resume Next
+
+    ' 1) Mod_Settings içindeki LOGO_PATH
+    If Len(Trim$(LOGO_PATH)) > 0 Then
+        If Len(Dir(LOGO_PATH)) > 0 Then
+            GetLogoFilePathSafe = LOGO_PATH
+            Exit Function
+        End If
+    End If
+
+    ' 2) Assets sayfasýndaki CompanyLogo'yu export et
+    GetLogoFilePathSafe = ExportAssetsLogoToTempPng()
+End Function
+
+
+' Assets!CompanyLogo þeklinin PNG çýktýsýný TEMP'e alýr
+Private Function ExportAssetsLogoToTempPng() As String
+    On Error GoTo Fail
+
+    Dim tmpPng As String
+    tmpPng = Environ$("TEMP") & "\isotec_company_logo.png"
+
+    Dim wsA As Worksheet
+    Set wsA = ThisWorkbook.Worksheets("Assets")
+
+    Dim shp As Shape
+    Set shp = wsA.Shapes("CompanyLogo")
+
+    ' Export baþarýlýysa dosya oluþur
+    shp.Export Filename:=tmpPng, FilterName:="PNG"
+
+    If Len(Dir(tmpPng)) > 0 Then
+        ExportAssetsLogoToTempPng = tmpPng
+    Else
+        ExportAssetsLogoToTempPng = ExportAssetsLogoToTempPng = ""
+    End If
+    Exit Function
+
+Fail:
+    ExportAssetsLogoToTempPng = ""
 End Function
 
 '== Logonun SAÐINA tema bantlý BÜYÜK baþlýk ==
@@ -972,17 +1021,35 @@ Private Function EnsureSysLogSheet() As Worksheet
 End Function
 
 ' Mod_Report.bas içindeki sürümün yerine
-Private Function HasDailyMailSent(ByVal email As String, Optional ByVal scope As String = "global", Optional ByVal sheetName As String = "") As Boolean
-    Dim ws As Worksheet, lastRow As Long, i As Long, d0 As Long, di As Long, e As String, sh As String
+Private Function HasDailyMailSent(ByVal email As String, _
+                                  Optional ByVal scope As String = "global", _
+                                  Optional ByVal sheetName As String = "", _
+                                  Optional ByVal slot As String = "") As Boolean
+    Dim ws As Worksheet, lastRow As Long, i As Long, d0 As Long, di As Long
+    Dim e As String, sh As String, note As String
+
     Set ws = EnsureSysLogSheet()
     lastRow = ws.Cells(ws.Rows.Count, "A").End(xlUp).Row
     d0 = CLng(Date)
+
     For i = 2 To lastRow
         If Not IsEmpty(ws.Cells(i, "A").value) Then
-            On Error Resume Next: di = CLng(CDate(ws.Cells(i, "A").value)): On Error GoTo 0
+            On Error Resume Next
+            di = CLng(CDate(ws.Cells(i, "A").value))
+            On Error GoTo 0
+
             If di = d0 Then
                 e = LCase$(Trim$(CStr(ws.Cells(i, "B").value)))
                 sh = CStr(ws.Cells(i, "C").value)
+                note = CStr(ws.Cells(i, "D").value)
+
+                ' Sadece gecikmiþ rapor notlarýnda slot kontrolü uygula
+                If InStr(1, note, "OverdueReport", vbTextCompare) > 0 Then
+                    If Len(slot) > 0 Then
+                        If InStr(1, note, "-" & slot, vbTextCompare) = 0 Then GoTo ContinueLoop
+                    End If
+                End If
+
                 If LCase$(Trim$(email)) = e Then
                     If LCase$(scope) = "sheet" Then
                         If sh = sheetName Then HasDailyMailSent = True: Exit Function
@@ -992,20 +1059,23 @@ Private Function HasDailyMailSent(ByVal email As String, Optional ByVal scope As
                 End If
             End If
         End If
+ContinueLoop:
     Next i
 End Function
 
-Private Sub MarkDailyMailSent(ByVal email As String, ByVal sheetName As String)
-    Dim ws As Worksheet, nextRow As Long
+Private Sub MarkDailyMailSent(ByVal email As String, ByVal sheetName As String, Optional ByVal slot As String = "")
+    Dim ws As Worksheet, nextRow As Long, noteVal As String
     Set ws = EnsureSysLogSheet()
     nextRow = ws.Cells(ws.Rows.Count, "A").End(xlUp).Row + 1
+    noteVal = "OverdueReport" & IIf(Len(slot) > 0, "-" & slot, "")
     ws.Cells(nextRow, "A").value = Date
     ws.Cells(nextRow, "B").value = email
     ws.Cells(nextRow, "C").value = sheetName
-    ws.Cells(nextRow, "D").value = "OverdueReport"
+    ws.Cells(nextRow, "D").value = noteVal
 End Sub
 
-Private Function BuildOverdueRecipients(ByVal ws As Worksheet) As Collection
+
+Private Function BuildOverdueRecipients(ByVal ws As Worksheet, Optional ByVal slot As String = "") As Collection
     Dim col As New Collection
     Dim lastRow As Long, r As Long
     Dim vJ As Variant, planDate As Variant, addr As String
@@ -1019,7 +1089,7 @@ Private Function BuildOverdueRecipients(ByVal ws As Worksheet) As Collection
                     If CDate(planDate) < Date Then
                         addr = ResolveRecipient(CStr(ws.Cells(r, "F").value))
                         If Len(addr) > 0 Then
-                            If Not HasDailyMailSent(addr, "sheet", ws.Name) Then
+                            If Not HasDailyMailSent(addr, "sheet", ws.Name, slot) Then
                                 On Error Resume Next
                                 col.Add addr, key:=LCase$(addr)
                                 On Error GoTo 0
@@ -1052,7 +1122,7 @@ End Function
 
 
 
-Public Sub SendOverdueReportForSheet(ByVal ws As Worksheet)
+Public Sub SendOverdueReportForSheet(ByVal ws As Worksheet, Optional ByVal slot As String = "")
     Dim recipients As Collection, i As Long
     Dim OutApp As Object, OutMail As Object
     Dim subjectText As String, html As String, pdfPath As String
@@ -1072,7 +1142,7 @@ Public Sub SendOverdueReportForSheet(ByVal ws As Worksheet)
     Set dCloseCnt = CreateObject("Scripting.Dictionary")
 
     ' 1) Alýcýlar (ayný kiþi günde 1 kez)
-    Set recipients = BuildOverdueRecipients(ws)
+    Set recipients = BuildOverdueRecipients(ws, slot)
     If recipients Is Nothing Then Exit Sub
     If recipients.Count = 0 Then Exit Sub
 
@@ -1254,7 +1324,7 @@ Public Sub SendOverdueReportForSheet(ByVal ws As Worksheet)
     End With
 
     For i = 1 To recipients.Count
-        Call MarkDailyMailSent(recipients(i), ws.Name)
+        Call MarkDailyMailSent(recipients(i), ws.Name, slot)
        Next i
 
 CleanExit:
@@ -1422,6 +1492,15 @@ Fail:
     ExportOverduePDF_FilteredCopy = ""
 End Function
 
+Public Sub RunDailyOverdueReports_WithSlot(ByVal slot As String)
+    Dim ws As Worksheet
+    For Each ws In ThisWorkbook.Worksheets
+        If IsMeetingSheet(ws) Then
+            SendOverdueReportForSheet ws, slot
+        End If
+    Next ws
+End Sub
+
 
 
 /* ===== END FILE: ./Mod_Report.bas ===== */
@@ -1490,73 +1569,120 @@ Attribute VB_Name = "Mod_Schedule"
 '== Mod_Schedule.bas ==
 Option Explicit
 
-' 17:00 "Geciken Görevler" zamanlayýcý için global randevu
-Public gNextRun As Date
+'==========================
+'  G L O B A L   T I M E R S
+'==========================
+' 09:00 ve 17:00 geciken rapor slotlarý
+Public gNextRun09 As Date
+Public gNextRun17 As Date
 
-' 08:15 "Bugün Ýþ Planý" zamanlayýcý için global randevu
+' 08:15 "Bugün Ýþ Planý" zamanlayýcý
 Public gNextRunPlan As Date
 
-' ---------- 17:00 GECÝKEN GÖREV RAPORLARI ----------
-Public Sub ScheduleDailyOverdueReports()
-    Dim runTime As Date, wd As Integer
-    wd = Weekday(Date, vbMonday)
-    runTime = Date + TimeValue("17:00:00")
+'==========================
+'  H E L P E R
+'==========================
+' Haftaiçi ise ayný gün/sýradaki gün; hafta sonu ise Pazartesi planlar
+Private Function NextWeekdayDateTime(ByVal timeStr As String) As Date
+    Dim wd As Integer
+    Dim t As Date
+    wd = Weekday(Date, vbMonday)          ' 1=Mon ... 7=Sun
+    t = Date + TimeValue(timeStr)
+
     If wd <= 5 Then
-        If Now > runTime Then runTime = Date + 1 + TimeValue("17:00:00")
-    Else
-        runTime = Date + (8 - wd) + TimeValue("17:00:00")
-    End If
-    gNextRun = runTime
-    Application.onTime EarliestTime:=gNextRun, Procedure:="RunDailyOverdueReports", Schedule:=True
-End Sub
-
-Public Sub RunDailyOverdueReports()
-    Dim ws As Worksheet
-    For Each ws In ThisWorkbook.Worksheets
-        If IsMeetingSheet(ws) Then
-            SendOverdueReportForSheet ws
+        If Now > t Then
+            NextWeekdayDateTime = Date + 1 + TimeValue(timeStr)
+        Else
+            NextWeekdayDateTime = t
         End If
-    Next ws
-    ScheduleDailyOverdueReports  ' bir sonraki randevuyu kur
+    Else
+        ' Cumartesi(6) -> +2, Pazar(7) -> +1
+        NextWeekdayDateTime = Date + (8 - wd) + TimeValue(timeStr)
+    End If
+End Function
+
+Private Sub ScheduleOverdueSlot(ByVal slotTime As String, ByVal slotName As String, ByRef nextRun As Date)
+    nextRun = NextWeekdayDateTime(slotTime)
+
+    If slotName = "09" Then
+        Application.onTime EarliestTime:=nextRun, Procedure:="RunDailyOverdueReports_09", Schedule:=True
+    Else
+        Application.onTime EarliestTime:=nextRun, Procedure:="RunDailyOverdueReports_17", Schedule:=True
+    End If
 End Sub
 
+'==========================
+'  O V E R D U E   (09:00 / 17:00)
+'==========================
+' Workbook_Open içinden çaðrýlýr
+Public Sub ScheduleDailyOverdueReports()
+    ' Çift planlamayý engelle (önce iptal, sonra kur)
+    CancelDailySchedule
+
+    ScheduleOverdueSlot "09:00:00", "09", gNextRun09
+    ScheduleOverdueSlot "17:00:00", "17", gNextRun17
+End Sub
+
+Public Sub RunDailyOverdueReports_09()
+    ' NOTE: Bu prosedür Mod_Report içinde olmalý:
+    '       RunDailyOverdueReports_WithSlot(slot As String)
+    RunDailyOverdueReports_WithSlot "09"
+
+    ' Bir sonraki 09:00'u kur
+    ScheduleOverdueSlot "09:00:00", "09", gNextRun09
+End Sub
+
+Public Sub RunDailyOverdueReports_17()
+    RunDailyOverdueReports_WithSlot "17"
+
+    ' Bir sonraki 17:00'yi kur
+    ScheduleOverdueSlot "17:00:00", "17", gNextRun17
+End Sub
+
+' Dashboard butonu için tek entrypoint (istersen iki turu da gönderir)
 Public Sub RunOverdueReportsNow()
-    RunDailyOverdueReports
+    ' Ýstersen sadece akþam turu:
+    'RunDailyOverdueReports_WithSlot "17"
+
+    ' Ýstersen iki turu da manuel gönder:
+    RunDailyOverdueReports_WithSlot "09"
+    RunDailyOverdueReports_WithSlot "17"
 End Sub
 
 Public Sub CancelDailySchedule()
     On Error Resume Next
-    If gNextRun <> 0 Then
-        Application.onTime EarliestTime:=gNextRun, Procedure:="RunDailyOverdueReports", Schedule:=False
-        gNextRun = 0
+    If gNextRun09 <> 0 Then
+        Application.onTime EarliestTime:=gNextRun09, Procedure:="RunDailyOverdueReports_09", Schedule:=False
     End If
+    If gNextRun17 <> 0 Then
+        Application.onTime EarliestTime:=gNextRun17, Procedure:="RunDailyOverdueReports_17", Schedule:=False
+    End If
+    gNextRun09 = 0
+    gNextRun17 = 0
 End Sub
 
-' ---------- 08:15 BUGÜN ÝÞ PLANI ----------
+'==========================
+'  T O D A Y   P L A N  (08:15)
+'==========================
 Public Sub ScheduleDailyTodayPlans()
-    Dim runTime As Date, wd As Integer
-    wd = Weekday(Date, vbMonday)
-    runTime = Date + TimeValue("08:15:00")
-    If wd <= 5 Then
-        If Now > runTime Then runTime = Date + 1 + TimeValue("08:15:00")
-    Else
-        runTime = Date + (8 - wd) + TimeValue("08:15:00")
-    End If
-    gNextRunPlan = runTime
+    ' Önce iptal (çift planlama engeli)
+    CancelDailyTodayPlans
+
+    gNextRunPlan = NextWeekdayDateTime("08:15:00")
     Application.onTime EarliestTime:=gNextRunPlan, Procedure:="RunDailyTodayPlans", Schedule:=True
 End Sub
 
 Public Sub RunDailyTodayPlans()
     SendTodayPlansForAll
-    ScheduleDailyTodayPlans  ' bir sonraki randevuyu kur
+    ScheduleDailyTodayPlans
 End Sub
 
 Public Sub CancelDailyTodayPlans()
-       On Error Resume Next
+    On Error Resume Next
     If gNextRunPlan <> 0 Then
         Application.onTime EarliestTime:=gNextRunPlan, Procedure:="RunDailyTodayPlans", Schedule:=False
-        gNextRunPlan = 0
-    End If
+       End If
+    gNextRunPlan = 0
 End Sub
 
 /* ===== END FILE: ./Mod_Schedule.bas ===== */
@@ -1658,7 +1784,10 @@ Private Function SendTodayPlanMail(ByVal personKey As String, ByVal items As Col
     If Len(toAddr) = 0 Then Exit Function
     fullName = ResolveFullName(personKey) ' kod/ad/email -> Ad Soyad
 
-    subjectText = "AAA Ýþ Planý - " & fullName & ", tarih " & Format(Date, "dd.MM.yyyy")
+    
+    ' Ýstenen format: "GG.AA.YYYY Ýþ Planý - Ad Soyad"  (ör. 16.12.2025 Ýþ Planý - Yunus Baðcý)
+    subjectText = Format(Date, "dd.MM.yyyy") & " Ýþ Planý - " & fullName
+
 
     ' --- HTML gövde ---
     html = ""
@@ -2605,7 +2734,6 @@ Private Sub SetMergedText(rng As Range, txt As String)
         rng.WrapText = True
     End If
 End Sub
-
 
 /* ===== END FILE: ./modFlow.bas ===== */
 
