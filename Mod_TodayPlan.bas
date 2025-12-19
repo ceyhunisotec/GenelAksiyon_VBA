@@ -50,7 +50,10 @@ Private Function SendTodayPlanMail(ByVal personKey As String, ByVal items As Col
     If Len(toAddr) = 0 Then Exit Function
     fullName = ResolveFullName(personKey) ' kod/ad/email -> Ad Soyad
 
-    subjectText = "AAA Ýþ Planý - " & fullName & ", tarih " & Format(Date, "dd.MM.yyyy")
+    
+    ' Ýstenen format: "GG.AA.YYYY Ýþ Planý - Ad Soyad"  (ör. 16.12.2025 Ýþ Planý - Yunus Baðcý)
+    subjectText = Format(Date, "dd.MM.yyyy") & " Ýþ Planý - " & fullName
+
 
     ' --- HTML gövde ---
     html = ""
