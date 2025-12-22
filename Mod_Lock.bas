@@ -1,6 +1,6 @@
 Attribute VB_Name = "Mod_Lock"
 Option Explicit
-
+'Deneme
 Private Const LOCK_FILE_NAME As String = "GenelAksiyon_Schedule.lock"
 
 Public Function AcquireGlobalLock() As Boolean
