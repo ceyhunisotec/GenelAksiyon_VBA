@@ -10,6 +10,7 @@ Attribute VB_Exposed = True
 
 '== ThisWorkbook ==
 Private Sub Workbook_Open()
+    StartAutoExport
     Set AppEv = New CAppEvents
     Set AppEv.App = Application
 
@@ -22,11 +23,11 @@ Private Sub Workbook_Open()
     Call CancelDailyTodayPlans
 
     ' Sonra yeniden kur
-    Call ScheduleDailyOverdueReports   ' 09:00 + 17:00 artýk burada kurulacak
-    Call ScheduleDailyTodayPlans       ' 08:15 günlük iþ planý
+    Call SafeInitDailySchedules
 End Sub
 
 Private Sub Workbook_BeforeClose(Cancel As Boolean)
+    StopAutoExport
     On Error Resume Next
     Set AppEv.App = Nothing
     Set AppEv = Nothing
